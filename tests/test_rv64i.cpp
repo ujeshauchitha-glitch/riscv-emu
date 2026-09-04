@@ -450,12 +450,14 @@ void test_ecall_and_ebreak_trap() {
 }
 
 void test_not_yet_implemented_traps_rather_than_misexecuting() {
-    // The M extension shares the OP opcode and is selected by funct7 == 0x01.
-    // Until phase 3 it must trap, not be mistaken for ADD.
-    Machine m({r_type(opcodes::OP, 3, 0x0, 1, 2, 0x01)});  // mul
-    const Status st = m.cpu->step();
-    CHECK(!st);
-    CHECK(st.trap.cause == Exception::IllegalInstruction);
+    // The M extension shares the OP opcode, selected by funct7 == 0x01. Phase 3
+    // implements it, so `mul` now executes rather than trapping; its behaviour
+    // is covered in tests/test_muldiv_atomic.cpp. What matters here is that it
+    // is not mistaken for ADD.
+    Machine m({ADDI(1, 0, 6), ADDI(2, 0, 7),
+               r_type(opcodes::OP, 3, 0x0, 1, 2, 0x01)});   // mul x3, x1, x2
+    m.cpu->run(3, nullptr);
+    CHECK_EQ_U(m.reg(3), 42);   // 6 * 7, not 6 + 7
 
     // CSR instructions and MRET share the SYSTEM opcode and were illegal in
     // phase 1; phase 2 implements them, so they now execute. Their behaviour is

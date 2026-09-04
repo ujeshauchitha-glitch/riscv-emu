@@ -1,5 +1,6 @@
 #include "cpu.hpp"
 
+#include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -150,6 +151,11 @@ void Cpu::enter_trap(u64 cause_code, u64 tval, u64 epc, bool is_interrupt) {
     csrs.set_mstatus(status);
     priv = PRIV_MACHINE;  // traps always land in machine mode until phase 6
 
+    // A trap may be a context switch. If one thread does LR, is interrupted,
+    // and another thread runs, the first thread's SC must fail when it
+    // eventually resumes - otherwise both could believe they took the lock.
+    clear_reservation();
+
     const u64 tvec = csrs.read(csr::MTVEC);
     const u64 base = tvec & ~csr::MTVEC_MODE_MASK;
     const u64 mode = tvec & csr::MTVEC_MODE_MASK;
@@ -233,6 +239,7 @@ Status Cpu::execute(const DecodedInst& inst) {
         case opcodes::OP_IMM_32: return execute_op_imm_32(inst);
         case opcodes::OP:        return execute_op(inst);
         case opcodes::OP_32:     return execute_op_32(inst);
+        case opcodes::AMO:       return execute_amo(inst);
         case opcodes::SYSTEM:    return execute_system(inst);
 
         // FENCE orders memory operations for other harts and devices. We are a
@@ -497,9 +504,11 @@ Status Cpu::execute_op_imm_32(const DecodedInst& inst) {
 // ---------------------------------------------------------------------------
 
 Status Cpu::execute_op(const DecodedInst& inst) {
-    // funct7 == 0x01 selects the M extension (MUL, DIV, REM ...), which lands
-    // in phase 3. Until then it correctly traps as illegal rather than being
-    // mistaken for one of the base operations.
+    // funct7 == 0x01 selects the M extension, which shares this opcode with the
+    // base ALU operations and differs only in funct7. A `mul` decoded as an
+    // `add` would be a genuinely nasty bug.
+    if (inst.funct7 == 0x01) return execute_mul_div(inst);
+
     if (inst.funct7 != 0x00 && inst.funct7 != 0x20) {
         return Status::bad(Exception::IllegalInstruction, inst.raw);
     }
@@ -562,6 +571,8 @@ Status Cpu::execute_op(const DecodedInst& inst) {
 }
 
 Status Cpu::execute_op_32(const DecodedInst& inst) {
+    if (inst.funct7 == 0x01) return execute_mul_div_32(inst);
+
     if (inst.funct7 != 0x00 && inst.funct7 != 0x20) {
         return Status::bad(Exception::IllegalInstruction, inst.raw);
     }
@@ -812,6 +823,270 @@ Status Cpu::execute_csr(const DecodedInst& inst) {
 // ---------------------------------------------------------------------------
 // Debug output
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// M extension: multiply and divide.
+//
+// The striking thing about RISC-V division is that **it never traps**. Divide
+// by zero and signed overflow both produce specific, defined values rather than
+// an exception:
+//
+//   DIV  by zero -> -1        DIVU by zero -> all ones (2^64 - 1)
+//   REM  by zero -> dividend  REMU by zero -> dividend
+//   DIV(INT64_MIN, -1) -> INT64_MIN     REM(INT64_MIN, -1) -> 0
+//
+// That last pair is the one C++ cannot express directly: INT64_MIN / -1 is
+// mathematically 2^63, which does not fit, and computing it is undefined
+// behaviour that crashes on x86 with SIGFPE. It has to be special-cased.
+//
+// The "no trap" choice keeps the hardware simple: no divider needs a fault
+// path, and software that cares checks its divisor beforehand.
+// ---------------------------------------------------------------------------
+
+Status Cpu::execute_mul_div(const DecodedInst& inst) {
+    const u64 a = read_reg(inst.rs1);
+    const u64 b = read_reg(inst.rs2);
+    const i64 sa = static_cast<i64>(a);
+    const i64 sb = static_cast<i64>(b);
+
+    switch (inst.funct3) {
+        case 0x0:  // MUL - low 64 bits; signedness does not affect the low half
+            write_reg(inst.rd, a * b);
+            return Status::good();
+
+        // The MULH family returns the *upper* 64 bits of the 128-bit product,
+        // so a full 64x64->128 multiply is needed. __int128 is a GCC/Clang
+        // extension rather than standard C++, but every compiler that can build
+        // this project has it, and hand-rolling the four-way split would add
+        // bugs without adding portability we would actually use.
+        case 0x1: {  // MULH - signed x signed
+            const __int128 p = static_cast<__int128>(sa) * static_cast<__int128>(sb);
+            write_reg(inst.rd, static_cast<u64>(static_cast<unsigned __int128>(p) >> 64));
+            return Status::good();
+        }
+
+        case 0x2: {  // MULHSU - signed x unsigned
+            // Casting the unsigned operand to __int128 zero-extends it, so it
+            // stays non-negative and the multiply is genuinely signed-by-
+            // unsigned. This instruction exists to make multi-word arithmetic
+            // work: the limbs of a bignum are unsigned, but the top one carries
+            // the sign.
+            const __int128 p = static_cast<__int128>(sa) * static_cast<__int128>(b);
+            write_reg(inst.rd, static_cast<u64>(static_cast<unsigned __int128>(p) >> 64));
+            return Status::good();
+        }
+
+        case 0x3: {  // MULHU - unsigned x unsigned
+            const unsigned __int128 p =
+                static_cast<unsigned __int128>(a) * static_cast<unsigned __int128>(b);
+            write_reg(inst.rd, static_cast<u64>(p >> 64));
+            return Status::good();
+        }
+
+        case 0x4:  // DIV
+            if (sb == 0) {
+                write_reg(inst.rd, ~0ull);                    // -1
+            } else if (sa == INT64_MIN && sb == -1) {
+                write_reg(inst.rd, static_cast<u64>(sa));     // overflow: wraps
+            } else {
+                write_reg(inst.rd, static_cast<u64>(sa / sb));
+            }
+            return Status::good();
+
+        case 0x5:  // DIVU
+            write_reg(inst.rd, (b == 0) ? ~0ull : (a / b));
+            return Status::good();
+
+        case 0x6:  // REM
+            if (sb == 0) {
+                write_reg(inst.rd, a);                        // the dividend
+            } else if (sa == INT64_MIN && sb == -1) {
+                write_reg(inst.rd, 0);
+            } else {
+                write_reg(inst.rd, static_cast<u64>(sa % sb));
+            }
+            return Status::good();
+
+        case 0x7:  // REMU
+            write_reg(inst.rd, (b == 0) ? a : (a % b));
+            return Status::good();
+
+        default:
+            return Status::bad(Exception::IllegalInstruction, inst.raw);
+    }
+}
+
+// The 32-bit forms. Same defined results, computed on 32 bits, then
+// sign-extended to 64 like every other *W instruction. Note there is no MULHW:
+// the upper half of a 32x32 product fits in the low 64 bits anyway, so MULW
+// alone is enough.
+Status Cpu::execute_mul_div_32(const DecodedInst& inst) {
+    const u32 a = static_cast<u32>(read_reg(inst.rs1));
+    const u32 b = static_cast<u32>(read_reg(inst.rs2));
+    const i32 sa = static_cast<i32>(a);
+    const i32 sb = static_cast<i32>(b);
+
+    switch (inst.funct3) {
+        case 0x0:  // MULW
+            write_reg(inst.rd, sext32(a * b));
+            return Status::good();
+
+        case 0x4:  // DIVW
+            if (sb == 0) {
+                write_reg(inst.rd, ~0ull);
+            } else if (sa == INT32_MIN && sb == -1) {
+                write_reg(inst.rd, sext32(static_cast<u32>(sa)));
+            } else {
+                write_reg(inst.rd, sext32(static_cast<u32>(sa / sb)));
+            }
+            return Status::good();
+
+        case 0x5:  // DIVUW
+            write_reg(inst.rd, (b == 0) ? ~0ull : sext32(a / b));
+            return Status::good();
+
+        case 0x6:  // REMW
+            if (sb == 0) {
+                write_reg(inst.rd, sext32(a));
+            } else if (sa == INT32_MIN && sb == -1) {
+                write_reg(inst.rd, 0);
+            } else {
+                write_reg(inst.rd, sext32(static_cast<u32>(sa % sb)));
+            }
+            return Status::good();
+
+        case 0x7:  // REMUW
+            write_reg(inst.rd, (b == 0) ? sext32(a) : sext32(a % b));
+            return Status::good();
+
+        default:
+            return Status::bad(Exception::IllegalInstruction, inst.raw);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A extension: atomics.
+//
+// Two families sharing one opcode, selected by funct5 (instruction bits 31:27):
+//
+//   LR / SC   load-reserved and store-conditional, the pair that builds
+//             lock-free algorithms and, in xv6's case, spinlocks
+//   AMO*      read-modify-write in one indivisible step
+//
+// **LR/SC.** LR loads a word and registers a reservation on its address. SC
+// stores only if that reservation still holds, and reports whether it did:
+// 0 in rd for success, non-zero for failure. Software retries on failure.
+//
+// The reason this pair exists rather than a plain compare-and-swap is the ABA
+// problem: CAS cannot tell "unchanged" from "changed and changed back". A
+// reservation is broken by *any* intervening write, so LR/SC notices.
+//
+// On a single-hart emulator nothing can write memory behind our back, so a
+// reservation could never be broken and every SC would succeed. That would be
+// wrong in one important way: a trap between the LR and the SC is a context
+// switch, and the thread that resumes must not inherit the other's
+// reservation. So enter_trap() clears it.
+//
+// **AMOs** load, apply an operation with rs2, store the result, and return the
+// *original* value in rd. On real hardware the whole sequence is indivisible;
+// here we execute one instruction at a time and nothing else touches memory, so
+// it already is.
+//
+// Unlike ordinary loads and stores, the spec *requires* natural alignment for
+// atomics - a misaligned one raises StoreAMOAddressMisaligned rather than being
+// emulated.
+// ---------------------------------------------------------------------------
+Status Cpu::execute_amo(const DecodedInst& inst) {
+    unsigned size;
+    if (inst.funct3 == 0x2)      size = 4;   // .W
+    else if (inst.funct3 == 0x3) size = 8;   // .D
+    else return Status::bad(Exception::IllegalInstruction, inst.raw);
+
+    // Bits 31:27 select the operation; bits 26 and 25 are the aq/rl ordering
+    // hints, which a single-hart in-order machine can ignore for the same
+    // reason FENCE is a no-op here.
+    const u32 funct5 = (inst.funct7 >> 2) & 0x1f;
+    const u64 addr   = read_reg(inst.rs1);
+
+    if (addr % size != 0) {
+        return Status::bad(Exception::StoreAMOAddressMisaligned, addr);
+    }
+
+    if (funct5 == 0x02) {  // LR
+        if (inst.rs2 != 0) return Status::bad(Exception::IllegalInstruction, inst.raw);
+        Result<u64> r = bus_.load(addr, size, AccessType::Load);
+        if (!r) return Status::bad(r.trap);
+
+        reservation_valid_ = true;
+        reservation_addr_  = addr;
+        write_reg(inst.rd, (size == 4) ? sext32(static_cast<u32>(r.value)) : r.value);
+        return Status::good();
+    }
+
+    if (funct5 == 0x03) {  // SC
+        const bool holds = reservation_valid_ && reservation_addr_ == addr;
+
+        // The reservation is consumed either way. Leaving it set after a failed
+        // SC would let a later SC succeed against a stale reservation.
+        reservation_valid_ = false;
+
+        if (holds) {
+            Status st = bus_.store(addr, size, read_reg(inst.rs2));
+            if (!st) return st;
+            write_reg(inst.rd, 0);   // 0 means the store happened
+        } else {
+            write_reg(inst.rd, 1);   // any non-zero means it did not
+        }
+        return Status::good();
+    }
+
+    // --- the read-modify-write AMOs ---
+    Result<u64> r = bus_.load(addr, size, AccessType::Load);
+    if (!r) return Status::bad(r.trap);
+
+    const u64 orig = r.value;
+    // Read rs2 before writing rd: they may be the same register.
+    const u64 src = read_reg(inst.rs2);
+    u64 result;
+
+    if (size == 4) {
+        const u32 ua = static_cast<u32>(orig), ub = static_cast<u32>(src);
+        const i32 sa = static_cast<i32>(ua),   sb = static_cast<i32>(ub);
+        switch (funct5) {
+            case 0x00: result = ua + ub; break;                        // AMOADD
+            case 0x01: result = ub; break;                             // AMOSWAP
+            case 0x04: result = ua ^ ub; break;                        // AMOXOR
+            case 0x08: result = ua | ub; break;                        // AMOOR
+            case 0x0c: result = ua & ub; break;                        // AMOAND
+            case 0x10: result = static_cast<u32>(sa < sb ? sa : sb); break;  // AMOMIN
+            case 0x14: result = static_cast<u32>(sa > sb ? sa : sb); break;  // AMOMAX
+            case 0x18: result = (ua < ub) ? ua : ub; break;            // AMOMINU
+            case 0x1c: result = (ua > ub) ? ua : ub; break;            // AMOMAXU
+            default: return Status::bad(Exception::IllegalInstruction, inst.raw);
+        }
+        Status st = bus_.store(addr, 4, result);
+        if (!st) return st;
+        write_reg(inst.rd, sext32(static_cast<u32>(orig)));
+    } else {
+        const i64 sa = static_cast<i64>(orig), sb = static_cast<i64>(src);
+        switch (funct5) {
+            case 0x00: result = orig + src; break;
+            case 0x01: result = src; break;
+            case 0x04: result = orig ^ src; break;
+            case 0x08: result = orig | src; break;
+            case 0x0c: result = orig & src; break;
+            case 0x10: result = static_cast<u64>(sa < sb ? sa : sb); break;
+            case 0x14: result = static_cast<u64>(sa > sb ? sa : sb); break;
+            case 0x18: result = (orig < src) ? orig : src; break;
+            case 0x1c: result = (orig > src) ? orig : src; break;
+            default: return Status::bad(Exception::IllegalInstruction, inst.raw);
+        }
+        Status st = bus_.store(addr, 8, result);
+        if (!st) return st;
+        write_reg(inst.rd, orig);
+    }
+    return Status::good();
+}
 
 void Cpu::trace_inst(const DecodedInst& inst) const {
     std::ostream& os = trace_stream ? *trace_stream : std::cerr;
