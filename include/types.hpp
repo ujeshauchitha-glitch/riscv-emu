@@ -34,15 +34,15 @@ constexpr int NUM_REGS = 32;
 // is what xv6-riscv and a stock Linux kernel are built to expect. Matching it
 // means we can boot unmodified guest binaries later on.
 //
-//   0x0010_0000  syscon      (poweroff / reboot)          [phase 4]
-//   0x0200_0000  CLINT       (timer + software interrupts)[phase 4]
-//   0x0C00_0000  PLIC        (external interrupts)        [phase 7]
-//   0x1000_0000  UART0       (NS16550A console)           [phase 4]
-//   0x1000_1000  virtio-mmio (block device)               [phase 7]
+//   0x0010_0000  syscon      (poweroff / reboot)
+//   0x0200_0000  CLINT       (timer + software interrupts)
+//   0x0C00_0000  PLIC        (external interrupts)         [not yet built]
+//   0x1000_0000  UART0       (NS16550A console)
+//   0x1000_1000  virtio-mmio (block device)                [not yet built]
 //   0x8000_0000  DRAM        (where the kernel is loaded)
 //
-// Only DRAM exists in this phase; the rest are listed so the map is documented
-// in one place as devices get added.
+// Addresses for devices that do not exist yet are reserved here so the map
+// lives in one place, and so nothing else is mapped over them by accident.
 // ---------------------------------------------------------------------------
 constexpr u64 SYSCON_BASE = 0x0010'0000;
 constexpr u64 CLINT_BASE  = 0x0200'0000;

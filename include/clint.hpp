@@ -48,7 +48,6 @@ public:
     void update(CsrFile& csrs) const;
 
     u64 mtime() const { return mtime_; }
-    void set_mtimecmp(u64 v) { mtimecmp_ = v; }
 
     // How fast the clock runs relative to instruction retirement. Larger values
     // make each timer tick cover more instructions.
