@@ -60,6 +60,15 @@ Result<u32> Cpu::fetch() const {
 }
 
 Status Cpu::step() {
+    // Devices that evolve with time, not just when addressed. The CLINT's
+    // counter advances and may assert a timer interrupt; that has to happen
+    // before the interrupt check below or a deadline would be noticed one
+    // instruction late.
+    if (clint) {
+        clint->tick();
+        clint->update(csrs);
+    }
+
     // Interrupts are checked before the fetch, not after the instruction.
     // An interrupt is not caused by the instruction at the PC - it is an
     // external event that happens *between* instructions, so the instruction
@@ -208,6 +217,12 @@ Status Cpu::run(u64 max_steps, u64* steps_out) {
         if (!st) {
             if (steps_out) *steps_out = n;
             return st;
+        }
+        // A guest that writes the poweroff word to syscon has asked to stop.
+        if (syscon && (syscon->poweroff_requested() || syscon->reboot_requested())) {
+            halted = true;
+            if (steps_out) *steps_out = n + 1;
+            return Status::good();
         }
     }
     if (steps_out) *steps_out = n;

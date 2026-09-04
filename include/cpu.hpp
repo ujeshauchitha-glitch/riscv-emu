@@ -4,8 +4,10 @@
 #include <iosfwd>
 
 #include "bus.hpp"
+#include "clint.hpp"
 #include "csr.hpp"
 #include "decoder.hpp"
+#include "syscon.hpp"
 #include "result.hpp"
 #include "types.hpp"
 
@@ -87,6 +89,15 @@ public:
 
     // The trap that stopped execution, when step() or run() returns a failure.
     Trap last_trap{};
+
+    // Optional devices the CPU has to consult every step rather than only when
+    // the guest addresses them. The bus routes loads and stores; these two need
+    // the CPU to advance the clock and to notice a poweroff request.
+    Clint*        clint  = nullptr;
+    const Syscon* syscon = nullptr;
+
+    // Set when a syscon poweroff or reboot stops the run.
+    bool halted = false;
 
     void dump_registers(std::ostream& os) const;
 
