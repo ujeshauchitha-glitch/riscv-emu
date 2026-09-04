@@ -12,8 +12,8 @@ modes. Linux additionally needs the C and F/D extensions, a device tree, and SBI
 | 2 | CPU state — registers, PC | ✅ done |
 | 3 | Fetch / decode / ADDI | ✅ done |
 | 0 | Foundation restructure + defect fixes | ✅ done |
-| 1 | Complete RV64I | ⬜ next |
-| 2 | Zicsr + M-mode traps | ⬜ |
+| 1 | Complete RV64I | ✅ done |
+| 2 | Zicsr + M-mode traps | ⬜ next |
 | 3 | M and A extensions | ⬜ |
 | 4 | ELF loader, UART, CLINT — first output | ⬜ |
 | 5 | riscv-tests + CI | ⬜ |
@@ -77,3 +77,35 @@ in place capable of carrying the rest of the roadmap.
 - `tests/` created for real, with 3 suites wired into CTest.
 
 **Docs:** [`00-architecture.md`](00-architecture.md)
+
+## Phase 1: Complete RV64I — done
+
+Every base integer instruction is implemented and tested. The emulator now runs
+real compiled code.
+
+**Added:** `LUI`, `AUIPC`, `JAL`, `JALR`, all six branches, all seven loads, all
+four stores, the ten register-register ALU ops, the nine RV64 `*W` forms,
+`FENCE`/`FENCE.I`, `ECALL`, `EBREAK`.
+
+**Fine print handled**
+
+- `*W` results are sign-extended from 32 to 64 bits, and `*W` inputs ignore bits
+  32–63. Zero-extending instead passes every small-number test and then breaks a
+  kernel thousands of instructions after the actual mistake.
+- 64-bit shifts mask the shift amount to 6 bits and select on `funct6`; 32-bit
+  shifts mask to 5 and select on `funct7`. Masking is required, not optional —
+  an unmasked shift by ≥ 64 is undefined behaviour in C++.
+- `JALR` clears bit 0 *after* the addition, and computes its target before
+  writing `rd` (they may be the same register).
+- A misaligned jump target traps on the *jump*, not on the target, so the PC
+  left behind points at the instruction that caused it.
+- A faulting load leaves its destination register untouched.
+- `funct7 == 0x01` (M extension) and `funct3 != 0` on SYSTEM (CSR ops) trap as
+  illegal rather than being mistaken for `ADD` or `ECALL`.
+
+**Testing:** 95 unit-test checks, plus a 14-check bare-metal self-test in
+`examples/rv64i_selftest.S` assembled by the real GNU assembler and run under
+CTest — validating the decoder against an independent implementation rather than
+against our own encoders.
+
+**Docs:** [`01-rv64i.md`](01-rv64i.md)

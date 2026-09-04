@@ -55,7 +55,7 @@ bool read_file(const std::string& path, std::vector<u8>& out) {
 //   slli  a2, t0, 4          a2 = 5 << 4 = 80
 //   srli  a3, t1, 60         a3 = 0xF          (logical: zeros shifted in)
 //   srai  a4, t1, 60         a4 = -1           (arithmetic: sign shifted in)
-//   ebreak                   stop (traps; not implemented until phase 2)
+//   ebreak                   stop (raises a breakpoint trap)
 const std::vector<u32> kDemoProgram = {
     0x00500293,  // addi  t0, zero, 5
     0xffd00313,  // addi  t1, zero, -3

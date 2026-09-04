@@ -40,17 +40,26 @@ No dependencies beyond a C++20 compiler and CMake ≥ 3.16.
 cd build && ctest --output-on-failure
 ```
 
+The suite includes a bare-metal self-test assembled with a real RISC-V
+toolchain. It is skipped automatically if one is not installed; to enable it:
+
+```bash
+apt-get install gcc-riscv64-unknown-elf
+```
+
 ## Status
 
-**Phase 0 complete** — foundation in place: bus with memory-mapped I/O, DRAM at
-`0x8000_0000`, full six-format instruction decoder, trap plumbing, and the
-OP-IMM instruction group.
+**Phase 1 complete** — the full RV64I base integer instruction set runs. The
+emulator executes real compiled code: `examples/rv64i_selftest.S` is assembled by
+the GNU assembler and passes all 14 of its checks.
 
-Next: the rest of RV64I.
+Next: CSRs and trap handling, so `ECALL` dispatches to a handler instead of
+halting.
 
-See [`docs/PHASES.md`](docs/PHASES.md) for the full roadmap and progress, and
-[`docs/00-architecture.md`](docs/00-architecture.md) for how the emulator is put
-together and why.
+See [`docs/PHASES.md`](docs/PHASES.md) for the full roadmap and progress.
+Design notes: [`00-architecture.md`](docs/00-architecture.md) (how the emulator
+is put together and why), [`01-rv64i.md`](docs/01-rv64i.md) (the instruction set,
+and the RV64 fine print that is easy to get wrong).
 
 ## Machine model
 
