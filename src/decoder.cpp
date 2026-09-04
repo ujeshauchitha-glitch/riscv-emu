@@ -118,20 +118,101 @@ DecodedInst decode(u32 raw) {
 }
 
 const char* mnemonic(const DecodedInst& inst) {
-    // Phase 0 implements only OP-IMM. Everything else is decoded into the right
-    // shape but not yet executed, so the tracer labels it "unimp".
-    if (inst.opcode == opcodes::OP_IMM) {
-        switch (inst.funct3) {
-            case 0x0: return "addi";
-            case 0x1: return "slli";
-            case 0x2: return "slti";
-            case 0x3: return "sltiu";
-            case 0x4: return "xori";
-            case 0x5: return (inst.funct6() == 0x10) ? "srai" : "srli";
-            case 0x6: return "ori";
-            case 0x7: return "andi";
-            default:  return "unimp";
-        }
+    switch (inst.opcode) {
+        case opcodes::LUI:   return "lui";
+        case opcodes::AUIPC: return "auipc";
+        case opcodes::JAL:   return "jal";
+        case opcodes::JALR:  return "jalr";
+
+        case opcodes::BRANCH:
+            switch (inst.funct3) {
+                case 0x0: return "beq";
+                case 0x1: return "bne";
+                case 0x4: return "blt";
+                case 0x5: return "bge";
+                case 0x6: return "bltu";
+                case 0x7: return "bgeu";
+                default:  return "unimp";
+            }
+
+        case opcodes::LOAD:
+            switch (inst.funct3) {
+                case 0x0: return "lb";
+                case 0x1: return "lh";
+                case 0x2: return "lw";
+                case 0x3: return "ld";
+                case 0x4: return "lbu";
+                case 0x5: return "lhu";
+                case 0x6: return "lwu";
+                default:  return "unimp";
+            }
+
+        case opcodes::STORE:
+            switch (inst.funct3) {
+                case 0x0: return "sb";
+                case 0x1: return "sh";
+                case 0x2: return "sw";
+                case 0x3: return "sd";
+                default:  return "unimp";
+            }
+
+        case opcodes::OP_IMM:
+            switch (inst.funct3) {
+                case 0x0: return "addi";
+                case 0x1: return "slli";
+                case 0x2: return "slti";
+                case 0x3: return "sltiu";
+                case 0x4: return "xori";
+                case 0x5: return (inst.funct6() == 0x10) ? "srai" : "srli";
+                case 0x6: return "ori";
+                case 0x7: return "andi";
+                default:  return "unimp";
+            }
+
+        case opcodes::OP_IMM_32:
+            switch (inst.funct3) {
+                case 0x0: return "addiw";
+                case 0x1: return "slliw";
+                case 0x5: return (inst.funct7 == 0x20) ? "sraiw" : "srliw";
+                default:  return "unimp";
+            }
+
+        case opcodes::OP:
+            // funct7 == 0x01 is the M extension, which arrives in phase 3.
+            if (inst.funct7 == 0x01) return "unimp";
+            switch (inst.funct3) {
+                case 0x0: return (inst.funct7 == 0x20) ? "sub" : "add";
+                case 0x1: return "sll";
+                case 0x2: return "slt";
+                case 0x3: return "sltu";
+                case 0x4: return "xor";
+                case 0x5: return (inst.funct7 == 0x20) ? "sra" : "srl";
+                case 0x6: return "or";
+                case 0x7: return "and";
+                default:  return "unimp";
+            }
+
+        case opcodes::OP_32:
+            if (inst.funct7 == 0x01) return "unimp";
+            switch (inst.funct3) {
+                case 0x0: return (inst.funct7 == 0x20) ? "subw" : "addw";
+                case 0x1: return "sllw";
+                case 0x5: return (inst.funct7 == 0x20) ? "sraw" : "srlw";
+                default:  return "unimp";
+            }
+
+        case opcodes::MISC_MEM:
+            return (inst.funct3 == 0x1) ? "fence.i" : "fence";
+
+        case opcodes::SYSTEM:
+            if (inst.funct3 != 0x0) return "unimp";  // CSR ops: phase 2
+            switch (inst.imm & 0xfff) {
+                case 0x000: return "ecall";
+                case 0x001: return "ebreak";
+                default:    return "unimp";
+            }
+
+        default:
+            return "unimp";
     }
-    return "unimp";
 }
