@@ -3,12 +3,36 @@
 An RV64 emulator written in modern C++20, built to boot a real operating system —
 **xv6-riscv** first, then **Linux**.
 
-## Goals
+No dependencies: a C++20 compiler and CMake ≥ 3.16 are all you need.
 
-- Learn computer architecture by building a machine that runs real software
-- Understand instruction decoding, privilege modes, virtual memory, and MMIO
-- Get to the point where an unmodified kernel boots to a shell
-- Keep the codebase modular, tested, and readable
+## Status
+
+**Phases 0 and 1 done, eight to go.** The full RV64I base integer instruction
+set runs, and the emulator executes real compiled code — `examples/rv64i_selftest.S` is
+assembled by the GNU assembler and passes all 14 of its checks.
+
+Next up: control and status registers and M-mode trap handling, so `ECALL`
+dispatches to a handler instead of halting the machine.
+
+## What works today
+
+| | Status |
+|---|---|
+| **RV64I** base integer instruction set | ✅ complete |
+| Six-format instruction decoder | ✅ |
+| Bus with memory-mapped I/O, DRAM at `0x8000_0000` | ✅ |
+| Trap causes and reporting | ✅ |
+| Zicsr — CSRs, `MRET`, trap dispatch | ⬜ phase 2 |
+| M — multiply / divide | ⬜ phase 3 |
+| A — atomics, `LR`/`SC` | ⬜ phase 3 |
+| Devices — UART, CLINT, PLIC, virtio | ⬜ phases 4, 7 |
+| S-mode + Sv39 virtual memory | ⬜ phase 6 |
+| C — compressed instructions | ⬜ phase 8 |
+| F/D — floating point | ⬜ phase 8 |
+
+Instructions that are not implemented yet raise an illegal-instruction trap
+rather than being silently mis-executed, so a program that needs them fails
+loudly at the exact instruction.
 
 ## Build
 
@@ -17,19 +41,21 @@ cmake -S . -B build
 cmake --build build
 ```
 
-No dependencies beyond a C++20 compiler and CMake ≥ 3.16.
-
 ## Run
 
 ```bash
-# Built-in demo: one of each OP-IMM instruction, then a register dump
+# Built-in demo: the OP-IMM instruction group, then a register dump
 ./build/riscv_emu
 
-# With an instruction trace (stderr)
+# One line per retired instruction, on stderr
 ./build/riscv_emu --trace
 
 # Run a flat binary image, loaded at 0x8000_0000
 ./build/riscv_emu path/to/image.bin
+
+# The bare-metal self-test (built when a RISC-V toolchain is installed).
+# It stops on ebreak with a0 = 0x3fff, one bit per passing check.
+./build/riscv_emu --dump build/rv64i_selftest.bin
 ```
 
 `--help` lists all options.
@@ -40,37 +66,90 @@ No dependencies beyond a C++20 compiler and CMake ≥ 3.16.
 cd build && ctest --output-on-failure
 ```
 
-The suite includes a bare-metal self-test assembled with a real RISC-V
-toolchain. It is skipped automatically if one is not installed; to enable it:
+Five suites: three unit-test binaries covering the decoder, the bus and the CPU;
+a 95-check RV64I suite; and a bare-metal self-test assembled with a real RISC-V
+toolchain. The last is skipped automatically when no toolchain is present — to
+enable it:
 
 ```bash
 apt-get install gcc-riscv64-unknown-elf
 ```
 
-## Status
+The unit tests build their programs with encoders written separately from the
+emulator's own decoder, and the self-test goes further by validating against an
+independent assembler. From phase 5 the official
+[`riscv-tests`](https://github.com/riscv-software-src/riscv-tests) suite takes
+over as the primary correctness signal, running in CI.
 
-**Phase 1 complete** — the full RV64I base integer instruction set runs. The
-emulator executes real compiled code: `examples/rv64i_selftest.S` is assembled by
-the GNU assembler and passes all 14 of its checks.
+## Layout
 
-Next: CSRs and trap handling, so `ECALL` dispatches to a handler instead of
-halting.
+```
+include/          src/
+  types.hpp         Widths, memory map, sign_extend
+  trap.hpp          Exception and interrupt cause codes      trap.cpp
+  result.hpp        Result<T> / Status — traps as values
+  device.hpp        The Device interface, AccessType
+  bus.hpp           Address decoding                         bus.cpp
+  dram.hpp          Guest RAM at 0x8000_0000                 dram.cpp
+  decoder.hpp       u32 -> DecodedInst                       decoder.cpp
+  cpu.hpp           Registers, fetch / decode / execute      cpu.cpp
+                    Command line                             main.cpp
 
-See [`docs/PHASES.md`](docs/PHASES.md) for the full roadmap and progress.
-Design notes: [`00-architecture.md`](docs/00-architecture.md) (how the emulator
-is put together and why), [`01-rv64i.md`](docs/01-rv64i.md) (the instruction set,
-and the RV64 fine print that is easy to get wrong).
+examples/         Bare-metal assembly + linker script
+tests/            Unit tests and the self-test harness
+docs/             Design notes, one per phase
+```
 
 ## Machine model
 
-Physical memory map, matching the QEMU `virt` machine so that unmodified guest
-kernels can be booted:
+The physical memory map matches the QEMU `virt` machine, so that unmodified
+guest kernels — which are linked expecting exactly this layout — can be booted.
 
-| Address | Device | Phase |
+| Address | Device | |
 |---|---|---|
-| `0x0010_0000` | syscon (poweroff/reboot) | 4 |
-| `0x0200_0000` | CLINT (timer, software interrupts) | 4 |
-| `0x0C00_0000` | PLIC (external interrupts) | 7 |
-| `0x1000_0000` | UART0 (NS16550A console) | 4 |
-| `0x1000_1000` | virtio-mmio (block device) | 7 |
+| `0x0010_0000` | syscon (poweroff / reboot) | phase 4 |
+| `0x0200_0000` | CLINT (timer, software interrupts) | phase 4 |
+| `0x0C00_0000` | PLIC (external interrupts) | phase 7 |
+| `0x1000_0000` | UART0 (NS16550A console) | phase 4 |
+| `0x1000_1000` | virtio-mmio (block device) | phase 7 |
 | `0x8000_0000` | DRAM | ✅ |
+
+Addresses claimed by no device raise an access fault rather than reading zero,
+so a kernel that jumps into the weeds stops immediately with a clear cause.
+
+## Roadmap
+
+| # | Phase | |
+|---|---|---|
+| 0 | Foundation: bus, decoder, trap plumbing | ✅ |
+| 1 | Complete RV64I | ✅ |
+| 2 | Zicsr + M-mode traps | ⬜ next |
+| 3 | M and A extensions | ⬜ |
+| 4 | ELF loader, UART, CLINT — first real output | ⬜ |
+| 5 | riscv-tests + CI | ⬜ |
+| 6 | S-mode + Sv39 MMU | ⬜ |
+| 7 | PLIC + virtio-blk — **boot xv6** | ⬜ |
+| 8 | Linux prerequisites (C, F/D, DTB, SBI) | ⬜ |
+| 9 | **Boot Linux** | ⬜ |
+
+Phase 7 is the milestone: xv6 booting to a shell. Linux is the stretch.
+
+[`docs/PHASES.md`](docs/PHASES.md) has the detail behind each phase.
+
+## Design notes
+
+Each phase ships an explainer alongside the code:
+
+- [`00-architecture.md`](docs/00-architecture.md) — why memory became a bus, why
+  traps are return values rather than exceptions, why the B and J immediate
+  encodings look scrambled
+- [`01-rv64i.md`](docs/01-rv64i.md) — the instruction set, and the RV64 fine
+  print that is easy to get wrong (`*W` sign extension, 6- vs 5-bit shift
+  amounts, where a misaligned-jump trap is reported)
+
+## Goals
+
+- Learn computer architecture by building a machine that runs real software
+- Understand instruction decoding, privilege modes, virtual memory, and MMIO
+- Get to the point where an unmodified kernel boots to a shell
+- Keep the codebase modular, tested, and readable
