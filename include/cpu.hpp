@@ -1,107 +1,78 @@
 #pragma once
 
 #include <array>
-#include <cstdint>
-#include <iostream>
-#include "memory.hpp"
+#include <iosfwd>
 
-constexpr int NUM_REGS = 32;
+#include "bus.hpp"
+#include "decoder.hpp"
+#include "result.hpp"
+#include "types.hpp"
 
-class CPU {
-    public:
-    Memory& memory;
-    //Registers
-    std::array<uint64_t, NUM_REGS> regs{};
+// ABI register names (zero, ra, sp, ...) indexed by register number.
+extern const char* const REG_ABI_NAMES[NUM_REGS];
 
-    //Program counter
-    uint64_t pc = 0;
+// ---------------------------------------------------------------------------
+// The CPU core.
+//
+// The execution loop is the classic fetch / decode / execute cycle, with one
+// important structural detail: **the PC is only advanced on success.**
+//
+// The previous version did `pc += 4` unconditionally at the end of execute(),
+// including on the path that printed "Unknown opcode". That meant a bad decode
+// silently skipped the instruction and kept going. When you are bringing up a
+// kernel, a wrong jump would send the PC into garbage and the emulator would
+// happily grind through megabytes of zeros rather than stopping at the point of
+// the mistake. Debugging that is close to impossible.
+//
+// Here, execute() writes to `next_pc`, and step() commits it only if no trap
+// occurred. On a trap the PC is left pointing at the faulting instruction,
+// which is exactly what a real hart does (it stashes that address in mepc) and
+// exactly what you want to see in a register dump.
+// ---------------------------------------------------------------------------
+class Cpu {
+public:
+    explicit Cpu(Bus& bus);
 
-    //Constructor
-    CPU(Memory& mem) : memory(mem) {
-        regs.fill(0);
-        pc = 0;
-    }
-    //Read register
-    inline uint64_t read_reg(uint32_t index) const{
-        if(index == 0){
-            return 0;
-        }
-        return regs[index];
-    }
+    // Architectural state.
+    std::array<u64, NUM_REGS> regs{};
+    u64                       pc = DRAM_BASE;
 
-    //Write register
-    inline void write_reg(uint32_t index, uint64_t value){
-        if(index == 0){
-            return;
-        }
-        regs[index] = value;
-    }
+    // x0 is hardwired to zero: reads always yield 0 and writes are discarded.
+    // Compilers rely on this constantly (`add x0, x0, x0` is the canonical NOP,
+    // and any instruction whose result is unwanted just targets x0).
+    u64  read_reg(u32 index) const;
+    void write_reg(u32 index, u64 value);
 
-    uint32_t fetch() const{
-        return memory.read32(pc);
-    }
+    // Run one instruction. Returns OK, or the trap the instruction raised.
+    Status step();
 
-    void decode(uint32_t instruction) {
-        uint32_t opcode = instruction & 0x7F;
-        uint32_t rd     = (instruction >> 7) & 0x1F;
-        uint32_t funct3 = (instruction >> 12) & 0x07;
-        uint32_t rs1    = (instruction >> 15) & 0x1F;
-        int32_t imm = static_cast<int32_t>(instruction) >> 20;
-        uint32_t funct7 = (instruction >> 25) & 0x7F;
+    // Run until a trap occurs or `max_steps` instructions have retired.
+    // Returns the trap that stopped execution, or OK if the step budget ran
+    // out. `steps_out`, when non-null, receives the number of instructions
+    // actually retired.
+    Status run(u64 max_steps, u64* steps_out = nullptr);
 
-        std::cout << "imm: " << imm << "\n";
+    // Fetch the 32-bit instruction word at the current PC.
+    Result<u32> fetch() const;
 
-        if (opcode == 0x13) {
-            std::cout << "Instruction: ADDI (I-Type)\n";
-        }
-        else {
-            std::cout << "Unknown opcode\n";
-        }
+    // Execute an already-decoded instruction. `next_pc_` is pre-set to pc + 4
+    // by step(); control-transfer instructions overwrite it.
+    Status execute(const DecodedInst& inst);
 
-        std::cout << "Instruction: 0x"
-                  << std::hex << instruction << std::dec << "\n";
+    void dump_registers(std::ostream& os) const;
 
-        std::cout << "Opcode: " << opcode << "\n";
-        std::cout << "rd: " << rd << "\n";
-        std::cout << "funct3: " << funct3 << "\n";
-        std::cout << "rs1: " << rs1 << "\n";
-        std::cout << "funct7: " << funct7 << "\n";
+    // Tracing is opt-in and off by default. The previous version printed seven
+    // lines to stdout for every instruction executed. Booting even a small
+    // kernel retires hundreds of millions of instructions, so unconditional
+    // tracing is not merely noisy — it makes the emulator unusable.
+    bool          trace          = false;
+    std::ostream* trace_stream   = nullptr;  // defaults to std::cerr
+    u64           instret        = 0;        // instructions retired
 
-        execute(opcode, rd, rs1, imm);
-    }
+private:
+    Bus& bus_;
+    u64  next_pc_ = 0;
 
-    void execute(uint32_t opcode,
-             uint32_t rd,
-             uint32_t rs1,
-             int32_t imm)
-    {
-        if (opcode == 0x13) {
-            write_reg(rd, read_reg(rs1) + imm);
-        }
-
-        pc += 4;
-    }
-
-    void step() {
-        uint32_t instruction = fetch();
-        decode(instruction);
-    }
-
-    //debug dump
-    void dump_registers() const{
-        const char* abi_names[NUM_REGS] = {
-            "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2",
-            "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5", 
-            "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7",
-            "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6"
-        };
-        std::cout << "===Register Dump===\n";
-        std::cout << "PC: 0x" << std::hex << pc << std::dec << "\n";
-        for(int i = 0; i < NUM_REGS; i++){
-            std::cout << i 
-            << "(" << abi_names[i] << ")" 
-            << "\t: 0x" << std::hex << regs[i] << std::dec << "\n";
-        }
-        std::cout << "=====================\n";
-    }
+    Status execute_op_imm(const DecodedInst& inst);
+    void   trace_inst(const DecodedInst& inst) const;
 };
