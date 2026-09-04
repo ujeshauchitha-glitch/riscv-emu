@@ -20,9 +20,13 @@ add_compile_options(-Wall -Wextra)
 add_library(riscv_core STATIC
   src/bus.cpp
   src/cpu.cpp
+  src/clint.cpp
   src/csr.cpp
+  src/elf_loader.cpp
   src/decoder.cpp
   src/dram.cpp
+  src/syscon.cpp
+  src/uart.cpp
   src/trap.cpp
 )
 target_include_directories(riscv_core PUBLIC include)
@@ -42,6 +46,7 @@ set(RISCV_EMU_TESTS
   test_rv64i
   test_csr
   test_muldiv_atomic
+  test_devices
 )
 
 foreach(test_name IN LISTS RISCV_EMU_TESTS)
@@ -68,13 +73,14 @@ find_program(RISCV_OBJCOPY NAMES riscv64-unknown-elf-objcopy riscv64-linux-gnu-o
 if(RISCV_AS AND RISCV_LD AND RISCV_OBJCOPY)
   set(SELFTEST_LD ${CMAKE_CURRENT_SOURCE_DIR}/examples/link.ld)
 
-  # Each entry is  <name>:<march>:<expected a0 in hex>.
+  # Each entry is  <name>:<march>:<expected a0 in hex>[:<expected console text>].
   # a0 accumulates one bit per passing sub-test, so a clear bit in a failure
   # message names exactly which check did not pass.
   set(SELFTESTS
     "rv64i_selftest:rv64i:3fff"
     "trap_selftest:rv64i_zicsr:fff"
     "muldiv_atomic_selftest:rv64ima_zicsr:7fff"
+    "device_selftest:rv64ima_zicsr:1f:uart works"
   )
 
   set(SELFTEST_OUTPUTS "")
@@ -83,6 +89,11 @@ if(RISCV_AS AND RISCV_LD AND RISCV_OBJCOPY)
     list(GET parts 0 st_name)
     list(GET parts 1 st_arch)
     list(GET parts 2 st_expect)
+    list(LENGTH parts st_nparts)
+    set(st_output "")
+    if(st_nparts GREATER 3)
+      list(GET parts 3 st_output)
+    endif()
 
     set(st_src ${CMAKE_CURRENT_SOURCE_DIR}/examples/${st_name}.S)
     set(st_bin ${CMAKE_CURRENT_BINARY_DIR}/${st_name}.bin)
@@ -103,6 +114,7 @@ if(RISCV_AS AND RISCV_LD AND RISCV_OBJCOPY)
         -DEMU=$<TARGET_FILE:riscv_emu>
         -DBIN=${st_bin}
         -DEXPECT=${st_expect}
+        -DEXPECT_OUTPUT=${st_output}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_selftest.cmake
     )
   endforeach()

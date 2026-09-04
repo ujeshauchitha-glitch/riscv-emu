@@ -84,7 +84,17 @@ u64 CsrFile::write_mask(u32 addr) {
     switch (addr) {
         case csr::MSTATUS:  return MSTATUS_MASK;
         case csr::MIE:      return INTERRUPT_MASK;
-        case csr::MIP:      return INTERRUPT_MASK;
+
+        // mip is NOT software-writable for the machine-level bits. MEIP, MTIP
+        // and MSIP are driven by hardware - the PLIC and the CLINT - and are
+        // read-only in mip. A kernel acknowledges a timer interrupt by moving
+        // mtimecmp forward, not by clearing MTIP; letting software clear the
+        // bit directly would make the interrupt reappear on the next update and
+        // look like a phantom re-entry.
+        //
+        // Phase 6 opens SSIP, which M-mode software genuinely may write to
+        // post a supervisor software interrupt.
+        case csr::MIP:      return 0;
 
         // misa is WARL and we do not support disabling extensions, so writes
         // are ignored entirely.

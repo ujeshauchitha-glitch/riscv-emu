@@ -7,14 +7,19 @@ No dependencies: a C++20 compiler and CMake ≥ 3.16 are all you need.
 
 ## Status
 
-**Phases 0-3 done, six to go.** The emulator implements RV64IMA with M-mode
-trap handling: the base integer set, multiply/divide, atomics, and CSRs with
-traps that dispatch to a handler the guest installs. Three self-tests in
-`examples/` are assembled by the GNU assembler and pass under the emulator,
-the last of them running a working LR/SC spinlock.
+**Phases 0-4 done, five to go.** The emulator implements RV64IMA with M-mode
+traps, and now has devices: a guest prints to the console, takes timer
+interrupts, and powers the machine off itself.
 
-Next up: an ELF loader, a UART and the CLINT - the first phase where a guest
-program can print something.
+```
+$ ./build/riscv_emu
+hello, RISC-V
+
+machine powered off after 79 instruction(s)
+```
+
+Next up: the official `riscv-tests` suite and CI, which is what makes the MMU
+work in phase 6 tractable.
 
 ## What works today
 
@@ -27,7 +32,9 @@ program can print something.
 | **Zicsr** — CSRs, `MRET`, `WFI`, trap dispatch, interrupts | ✅ complete |
 | **M** — multiply / divide | ✅ complete |
 | **A** — atomics, `LR`/`SC` | ✅ complete |
-| Devices — UART, CLINT, PLIC, virtio | ⬜ phases 4, 7 |
+| **Devices** — UART, CLINT, syscon | ✅ complete |
+| **ELF64 loader** | ✅ complete |
+| Devices — PLIC, virtio-blk | ⬜ phase 7 |
 | S-mode + Sv39 virtual memory | ⬜ phase 6 |
 | C — compressed instructions | ⬜ phase 8 |
 | F/D — floating point | ⬜ phase 8 |
@@ -52,14 +59,16 @@ cmake --build build
 # One line per retired instruction, on stderr
 ./build/riscv_emu --trace
 
-# Run a flat binary image, loaded at 0x8000_0000
-./build/riscv_emu path/to/image.bin
+# Run an ELF64 image, or a flat binary loaded at 0x8000_0000.
+# The format is detected from the file's magic number.
+./build/riscv_emu path/to/kernel.elf
 
 # The bare-metal self-tests (built when a RISC-V toolchain is installed).
 # Each stops on ebreak with one bit set in a0 per passing check.
 ./build/riscv_emu --dump build/rv64i_selftest.bin   # expect a0 = 0x3fff
 ./build/riscv_emu --dump build/trap_selftest.bin    # expect a0 = 0xfff
 ./build/riscv_emu --dump build/muldiv_atomic_selftest.bin  # expect a0 = 0x7fff
+./build/riscv_emu build/device_selftest.bin         # prints, then powers off
 ```
 
 `--help` lists all options.
@@ -70,9 +79,9 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-Nine suites: unit tests for the decoder, the bus, the CPU, the RV64I
-instruction set, the CSR/trap machinery and the M/A extensions, plus three
-bare-metal self-tests
+Eleven suites: unit tests for the decoder, the bus, the CPU, the RV64I
+instruction set, the CSR/trap machinery, the M/A extensions and the devices,
+plus four bare-metal self-tests
 assembled with a real RISC-V toolchain. The self-tests are skipped automatically
 when no toolchain is present - to enable them:
 
@@ -99,6 +108,10 @@ include/          src/
   decoder.hpp       u32 -> DecodedInst                       decoder.cpp
   cpu.hpp           Registers, fetch / decode / execute      cpu.cpp
   csr.hpp           Control and status registers             csr.cpp
+  uart.hpp          NS16550A console                         uart.cpp
+  clint.hpp         Timer and software interrupts            clint.cpp
+  syscon.hpp        Poweroff / reboot                        syscon.cpp
+  elf_loader.hpp    ELF64 image loading                      elf_loader.cpp
                     Command line                             main.cpp
 
 examples/         Bare-metal assembly + linker script
@@ -113,10 +126,10 @@ guest kernels — which are linked expecting exactly this layout — can be boot
 
 | Address | Device | |
 |---|---|---|
-| `0x0010_0000` | syscon (poweroff / reboot) | phase 4 |
-| `0x0200_0000` | CLINT (timer, software interrupts) | phase 4 |
+| `0x0010_0000` | syscon (poweroff / reboot) | ✅ |
+| `0x0200_0000` | CLINT (timer, software interrupts) | ✅ |
 | `0x0C00_0000` | PLIC (external interrupts) | phase 7 |
-| `0x1000_0000` | UART0 (NS16550A console) | phase 4 |
+| `0x1000_0000` | UART0 (NS16550A console) | ✅ |
 | `0x1000_1000` | virtio-mmio (block device) | phase 7 |
 | `0x8000_0000` | DRAM | ✅ |
 
@@ -131,8 +144,8 @@ so a kernel that jumps into the weeds stops immediately with a clear cause.
 | 1 | Complete RV64I | ✅ |
 | 2 | Zicsr + M-mode traps | ✅ |
 | 3 | M and A extensions | ✅ |
-| 4 | ELF loader, UART, CLINT — first real output | ⬜ next |
-| 5 | riscv-tests + CI | ⬜ |
+| 4 | ELF loader, UART, CLINT — first real output | ✅ |
+| 5 | riscv-tests + CI | ⬜ next |
 | 6 | S-mode + Sv39 MMU | ⬜ |
 | 7 | PLIC + virtio-blk — **boot xv6** | ⬜ |
 | 8 | Linux prerequisites (C, F/D, DTB, SBI) | ⬜ |
@@ -157,6 +170,9 @@ Each phase ships an explainer alongside the code:
   instruction but past an interrupted one
 - [`03-m-and-a.md`](docs/03-m-and-a.md) - why RISC-V division never traps, and
   why a trap has to break an LR/SC reservation
+- [`04-devices-and-mmio.md`](docs/04-devices-and-mmio.md) - memory-mapped I/O,
+  why the timer clock counts instructions rather than seconds, and why interrupt
+  pending bits belong to hardware rather than software
 
 ## Goals
 

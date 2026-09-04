@@ -15,8 +15,8 @@ modes. Linux additionally needs the C and F/D extensions, a device tree, and SBI
 | 1 | Complete RV64I | ✅ done |
 | 2 | Zicsr + M-mode traps | ✅ done |
 | 3 | M and A extensions | ✅ done |
-| 4 | ELF loader, UART, CLINT — first output | ⬜ next |
-| 5 | riscv-tests + CI | ⬜ |
+| 4 | ELF loader, UART, CLINT — first output | ✅ done |
+| 5 | riscv-tests + CI | ⬜ next |
 | 6 | S-mode + Sv39 MMU | ⬜ |
 | 7 | PLIC + virtio-blk — **boot xv6** | ⬜ |
 | 8 | Linux prerequisites (C, F/D, DTB, SBI) | ⬜ |
@@ -173,3 +173,33 @@ their `*W` forms; `LR`/`SC` in `.W`/`.D`; all nine AMOs in `.W`/`.D`.
 `examples/muldiv_atomic_selftest.S` ending with a working LR/SC spinlock.
 
 **Docs:** [`03-m-and-a.md`](03-m-and-a.md)
+
+## Phase 4: ELF loader, UART, CLINT — done
+
+The emulator can be heard from. A guest prints to the console, gets interrupted
+by a timer, and shuts the machine down on its own terms.
+
+**Added:** NS16550A UART at `0x1000_0000`, CLINT at `0x0200_0000`, syscon at
+`0x0010_0000`, an ELF64 loader, and a machine assembled from all of them in
+`main.cpp`.
+
+**Fine print handled**
+
+- The UART's DLAB bit banks registers 0 and 1 over to the baud-rate divisor. A
+  driver sets it during init, so ignoring it prints the divisor bytes as text.
+- `mtime` advances with retired instructions, not wall-clock time, so runs are
+  reproducible — a timer lands on the same instruction every run.
+- `MTIP` and `MSIP` are read-only in `mip`: hardware owns them. A kernel
+  acknowledges the timer by moving `mtimecmp`, not by clearing the bit. This
+  corrected a phase-2 behaviour and broke the phase-2 self-test, which now
+  raises its software interrupt through the CLINT as real code would.
+- `mtimecmp` resets to 0, so `MTIP` asserts from boot — which is why kernels set
+  it before enabling `MTIE`.
+- The ELF loader uses `p_paddr`, not `p_vaddr`: at boot there is no MMU yet.
+- `p_memsz > p_filesz` means `.bss` and must be zero-filled.
+
+**Testing:** 43 unit-test checks, plus a 5-check device self-test that prints,
+takes a timer interrupt and powers off. The self-test harness now also verifies
+console output.
+
+**Docs:** [`04-devices-and-mmio.md`](04-devices-and-mmio.md)
