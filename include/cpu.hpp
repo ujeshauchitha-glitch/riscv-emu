@@ -24,7 +24,7 @@ extern const char* const REG_ABI_NAMES[NUM_REGS];
 // happily grind through megabytes of zeros rather than stopping at the point of
 // the mistake. Debugging that is close to impossible.
 //
-// Here, execute() writes to `next_pc`, and step() commits it only if no trap
+// Here, execute() writes to `next_pc_`, and step() commits it only if no trap
 // occurred. On a trap the PC is left pointing at the faulting instruction,
 // which is exactly what a real hart does (it stashes that address in mepc) and
 // exactly what you want to see in a register dump.
@@ -64,15 +64,35 @@ public:
     // Tracing is opt-in and off by default. The previous version printed seven
     // lines to stdout for every instruction executed. Booting even a small
     // kernel retires hundreds of millions of instructions, so unconditional
-    // tracing is not merely noisy — it makes the emulator unusable.
-    bool          trace          = false;
-    std::ostream* trace_stream   = nullptr;  // defaults to std::cerr
-    u64           instret        = 0;        // instructions retired
+    // tracing is not merely noisy - it makes the emulator unusable.
+    bool          trace        = false;
+    std::ostream* trace_stream = nullptr;  // defaults to std::cerr
+    u64           instret      = 0;        // instructions retired
 
 private:
     Bus& bus_;
     u64  next_pc_ = 0;
 
-    Status execute_op_imm(const DecodedInst& inst);
-    void   trace_inst(const DecodedInst& inst) const;
+    // One handler per major opcode group.
+    Status execute_op_imm(const DecodedInst& inst);     // ADDI, SLTI, ... SRAI
+    Status execute_op_imm_32(const DecodedInst& inst);  // ADDIW, SLLIW, ...
+    Status execute_op(const DecodedInst& inst);         // ADD, SUB, SLL, ...
+    Status execute_op_32(const DecodedInst& inst);      // ADDW, SUBW, SLLW, ...
+    Status execute_load(const DecodedInst& inst);       // LB .. LWU
+    Status execute_store(const DecodedInst& inst);      // SB .. SD
+    Status execute_branch(const DecodedInst& inst);     // BEQ .. BGEU
+    Status execute_jal(const DecodedInst& inst);
+    Status execute_jalr(const DecodedInst& inst);
+    Status execute_system(const DecodedInst& inst);     // ECALL, EBREAK
+
+    // Redirect control flow to `target`, or raise InstructionAddressMisaligned.
+    //
+    // The spec is specific about where this trap is reported: on the *jump or
+    // branch* instruction, not on the target. So the check happens here, before
+    // next_pc_ is committed, rather than at fetch time - that way the PC left
+    // behind (and later mepc) points at the instruction that did the jumping,
+    // which is the one you need to look at.
+    Status set_branch_target(u64 target);
+
+    void trace_inst(const DecodedInst& inst) const;
 };
