@@ -59,8 +59,23 @@ Result<u32> Cpu::fetch() const {
 }
 
 Status Cpu::step() {
+    // Interrupts are checked before the fetch, not after the instruction.
+    // An interrupt is not caused by the instruction at the PC - it is an
+    // external event that happens *between* instructions, so the instruction
+    // that has not run yet must not run, and mepc must point at it so that MRET
+    // resumes exactly there.
+    // Note there is no "no handler installed" special case here, unlike for
+    // exceptions: an interrupt can only be pending if the guest set mstatus.MIE
+    // and an mie bit, which means it is deliberately using interrupts and has
+    // had every opportunity to set mtvec.
+    Interrupt intr;
+    if (next_interrupt(intr)) {
+        take_interrupt(intr);
+        return Status::good();
+    }
+
     Result<u32> word = fetch();
-    if (!word) return Status::bad(word.trap);
+    if (!word) return handle_trap_or_stop(word.trap);
 
     const DecodedInst inst = decode(word.value);
 
@@ -71,15 +86,113 @@ Status Cpu::step() {
     if (trace) trace_inst(inst);
 
     Status st = execute(inst);
-    if (!st) {
-        // Leave pc on the faulting instruction. Once CSRs exist (phase 2) this
-        // is the value that goes into mepc.
-        return st;
-    }
+    if (!st) return handle_trap_or_stop(st.trap);
 
     pc = next_pc_;
     ++instret;
+    csrs.write(csr::MINSTRET, instret);
+    // One instruction per cycle. A real machine's cycle count differs from its
+    // retired-instruction count, but nothing we can boot depends on that, and
+    // guest code does use mcycle for crude delay loops.
+    csrs.write(csr::MCYCLE, instret);
     return Status::good();
+}
+
+// Dispatch a trap to the guest's handler, or stop the machine if there is no
+// handler installed yet. See `trap_fatal_without_handler` in cpu.hpp.
+Status Cpu::handle_trap_or_stop(const Trap& trap) {
+    last_trap = trap;
+
+    if (trap_fatal_without_handler && csrs.read(csr::MTVEC) == 0) {
+        // Leave pc on the faulting instruction, which is both what a register
+        // dump wants to show and what mepc would have received.
+        return Status::bad(trap);
+    }
+
+    take_trap(trap);
+    return Status::good();
+}
+
+// ---------------------------------------------------------------------------
+// Trap entry.
+//
+// The sequence below is fixed by the privileged spec, and every step matters:
+//
+//   mepc    <- the address to resume at
+//   mcause  <- why we trapped
+//   mtval   <- extra detail (faulting address, or the instruction bits)
+//   MPIE    <- MIE          (save whether interrupts were enabled)
+//   MIE     <- 0            (disable them, so the handler is not re-entered)
+//   MPP     <- current privilege  (remember where to return to)
+//   pc      <- mtvec
+//
+// MPIE and MPP together are what let MRET restore the machine exactly. Without
+// them there would be no way back.
+// ---------------------------------------------------------------------------
+void Cpu::enter_trap(u64 cause_code, u64 tval, u64 epc, bool is_interrupt) {
+    csrs.write(csr::MEPC, epc);
+    csrs.write(csr::MCAUSE, cause_code);
+    csrs.write(csr::MTVAL, tval);
+
+    u64 status = csrs.mstatus();
+
+    // Save the current interrupt-enable into MPIE, then clear MIE. A handler
+    // therefore starts with interrupts off and cannot be interrupted by the
+    // same source before it has had a chance to quiet it.
+    const bool mie = (status & csr::MSTATUS_MIE) != 0;
+    status = mie ? (status | csr::MSTATUS_MPIE) : (status & ~csr::MSTATUS_MPIE);
+    status &= ~csr::MSTATUS_MIE;
+
+    // Record the privilege we came from, so MRET knows where to return.
+    status = (status & ~csr::MSTATUS_MPP) |
+             (static_cast<u64>(priv) << csr::MSTATUS_MPP_SHIFT);
+
+    csrs.set_mstatus(status);
+    priv = PRIV_MACHINE;  // traps always land in machine mode until phase 6
+
+    const u64 tvec = csrs.read(csr::MTVEC);
+    const u64 base = tvec & ~csr::MTVEC_MODE_MASK;
+    const u64 mode = tvec & csr::MTVEC_MODE_MASK;
+
+    // Vectored mode spreads *interrupts* across a table of handlers, one entry
+    // per cause, four bytes apart. Exceptions always go to the base address
+    // even in vectored mode - a detail that is easy to miss and produces wild
+    // jumps when got wrong.
+    if (mode == csr::MTVEC_MODE_VECTORED && is_interrupt) {
+        pc = base + 4 * (cause_code & 0x3f);
+    } else {
+        pc = base;
+    }
+}
+
+void Cpu::take_trap(const Trap& trap) {
+    // An exception resumes at the instruction that caused it. That is right for
+    // a page fault (fix the mapping, retry) and for ECALL the handler advances
+    // mepc by 4 itself before returning.
+    enter_trap(trap.cause_code(), trap.tval, pc, false);
+}
+
+void Cpu::take_interrupt(Interrupt intr) {
+    // An interrupt resumes at the instruction that has not run yet.
+    enter_trap(interrupt_cause_code(intr), 0, pc, true);
+}
+
+bool Cpu::next_interrupt(Interrupt& out) const {
+    // Interrupts are globally gated by mstatus.MIE while in machine mode.
+    if (!csrs.mstatus_mie()) return false;
+
+    const u64 ready = csrs.pending_enabled();
+    if (ready == 0) return false;
+
+    // Priority order is fixed by the spec: external, then software, then timer,
+    // machine before supervisor. It is not the bit order.
+    if (ready & csr::MIP_MEIP) { out = Interrupt::MachineExternal; return true; }
+    if (ready & csr::MIP_MSIP) { out = Interrupt::MachineSoftware; return true; }
+    if (ready & csr::MIP_MTIP) { out = Interrupt::MachineTimer;    return true; }
+    if (ready & csr::MIP_SEIP) { out = Interrupt::SupervisorExternal; return true; }
+    if (ready & csr::MIP_SSIP) { out = Interrupt::SupervisorSoftware; return true; }
+    if (ready & csr::MIP_STIP) { out = Interrupt::SupervisorTimer;    return true; }
+    return false;
 }
 
 Status Cpu::run(u64 max_steps, u64* steps_out) {
@@ -497,27 +610,201 @@ Status Cpu::execute_op_32(const DecodedInst& inst) {
 
 Status Cpu::execute_system(const DecodedInst& inst) {
     if (inst.funct3 != 0x0) {
-        // CSRRW/CSRRS/CSRRC and friends - phase 2.
-        return Status::bad(Exception::IllegalInstruction, inst.raw);
-    }
-
-    // rd and rs1 must be zero for ECALL/EBREAK.
-    if (inst.rd != 0 || inst.rs1 != 0) {
-        return Status::bad(Exception::IllegalInstruction, inst.raw);
+        return execute_csr(inst);
     }
 
     switch (inst.imm & 0xfff) {
-        case 0x000:
-            // With no privilege modes yet we are effectively always in machine
-            // mode, so this is the M-mode cause. Phase 6 makes it depend on the
-            // current privilege level.
-            return Status::bad(Exception::ECallFromMMode, 0);
+        case 0x000:  // ECALL
+            if (inst.rd != 0 || inst.rs1 != 0) {
+                return Status::bad(Exception::IllegalInstruction, inst.raw);
+            }
+            // The cause encodes which privilege level made the call, so that a
+            // machine-mode handler can tell a kernel's SBI call apart from a
+            // user program's system call.
+            switch (priv) {
+                case PRIV_USER:       return Status::bad(Exception::ECallFromUMode, 0);
+                case PRIV_SUPERVISOR: return Status::bad(Exception::ECallFromSMode, 0);
+                default:              return Status::bad(Exception::ECallFromMMode, 0);
+            }
 
-        case 0x001:
+        case 0x001:  // EBREAK
+            if (inst.rd != 0 || inst.rs1 != 0) {
+                return Status::bad(Exception::IllegalInstruction, inst.raw);
+            }
             return Status::bad(Exception::Breakpoint, pc);
 
+        case 0x302:  // MRET
+            return execute_mret(inst);
+
+        case 0x105:  // WFI - wait for interrupt
+            if (inst.rd != 0 || inst.rs1 != 0) {
+                return Status::bad(Exception::IllegalInstruction, inst.raw);
+            }
+            // The spec explicitly permits implementing WFI as a no-op: it is a
+            // hint, and software must treat its completion as advisory and
+            // re-check the condition it was waiting on. Running the loop hot
+            // costs us nothing but host CPU. Phase 4 can make it genuinely idle
+            // once there is a timer to sleep until.
+            return Status::good();
+
         default:
-            // MRET (0x302), SRET (0x102), WFI (0x105) etc. - phases 2 and 6.
+            // SRET (0x102) and SFENCE.VMA arrive with supervisor mode in
+            // phase 6.
+            return Status::bad(Exception::IllegalInstruction, inst.raw);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MRET - return from a machine-mode trap handler.
+//
+// Exactly undoes what enter_trap() did:
+//
+//   MIE       <- MPIE       (restore the previous interrupt-enable)
+//   MPIE      <- 1
+//   privilege <- MPP        (return to where the trap came from)
+//   MPP       <- least-privileged supported mode
+//   pc        <- mepc
+// ---------------------------------------------------------------------------
+Status Cpu::execute_mret(const DecodedInst& inst) {
+    if (inst.rd != 0 || inst.rs1 != 0) {
+        return Status::bad(Exception::IllegalInstruction, inst.raw);
+    }
+    if (priv < PRIV_MACHINE) {
+        // MRET from anything below machine mode is illegal. Unreachable until
+        // phase 6, but the check belongs with the instruction.
+        return Status::bad(Exception::IllegalInstruction, inst.raw);
+    }
+
+    u64 status = csrs.mstatus();
+
+    const bool mpie = (status & csr::MSTATUS_MPIE) != 0;
+    status = mpie ? (status | csr::MSTATUS_MIE) : (status & ~csr::MSTATUS_MIE);
+
+    // MPIE is set, not cleared. The spec is specific about this and it is easy
+    // to get backwards.
+    status |= csr::MSTATUS_MPIE;
+
+    const u32 return_priv =
+        static_cast<u32>((status & csr::MSTATUS_MPP) >> csr::MSTATUS_MPP_SHIFT);
+
+    status = (status & ~csr::MSTATUS_MPP) |
+             (static_cast<u64>(PRIV_LEAST_SUPPORTED) << csr::MSTATUS_MPP_SHIFT);
+
+    csrs.set_mstatus(status);
+    priv = return_priv;
+
+    next_pc_ = csrs.read(csr::MEPC);
+    return Status::good();
+}
+
+// ---------------------------------------------------------------------------
+// CSR access checks.
+//
+// Three ways a CSR access can be illegal, all reported as IllegalInstruction:
+//
+//   1. the CSR is not implemented
+//   2. the instruction writes a read-only CSR (address bits [11:10] == 11)
+//   3. the current privilege is below the CSR's minimum (bits [9:8])
+//
+// The first of these is not a limitation but a feature: probing a CSR and
+// catching the trap is how software detects optional extensions.
+// ---------------------------------------------------------------------------
+
+Result<u64> Cpu::csr_read(u32 addr) const {
+    if (!csrs.exists(addr)) {
+        return Result<u64>::bad(Exception::IllegalInstruction, 0);
+    }
+    if (priv < csr::min_privilege(addr)) {
+        return Result<u64>::bad(Exception::IllegalInstruction, 0);
+    }
+    return Result<u64>::good(csrs.read(addr));
+}
+
+Status Cpu::csr_write(u32 addr, u64 value) {
+    if (!csrs.exists(addr)) {
+        return Status::bad(Exception::IllegalInstruction, 0);
+    }
+    if (csr::is_read_only(addr)) {
+        return Status::bad(Exception::IllegalInstruction, 0);
+    }
+    if (priv < csr::min_privilege(addr)) {
+        return Status::bad(Exception::IllegalInstruction, 0);
+    }
+    csrs.write(addr, value);
+    return Status::good();
+}
+
+// ---------------------------------------------------------------------------
+// The six CSR instructions.
+//
+//   CSRRW  rd, csr, rs1     rd = csr; csr = rs1
+//   CSRRS  rd, csr, rs1     rd = csr; csr |= rs1      (set bits)
+//   CSRRC  rd, csr, rs1     rd = csr; csr &= ~rs1     (clear bits)
+//   CSRRWI/CSRRSI/CSRRCI    same, with a 5-bit zero-extended immediate
+//
+// Each does an atomic read-modify-write, which is why setting a single bit in
+// mstatus does not need a lock even on a real multi-hart machine.
+//
+// The subtlety is in when the access is *suppressed*:
+//
+//   * CSRRW/CSRRWI with rd == x0 must not READ the CSR
+//   * CSRRS/CSRRC (and the immediate forms) with a zero source must not WRITE
+//
+// This matters because some CSRs have read or write side effects - reading a
+// PLIC claim register acknowledges an interrupt, for instance. Performing a
+// suppressed access would silently consume events. It also means
+// `csrr rd, csr` (which assembles to CSRRS with rs1 = x0) is a pure read and
+// can legally target a read-only CSR.
+// ---------------------------------------------------------------------------
+Status Cpu::execute_csr(const DecodedInst& inst) {
+    const u32 addr = static_cast<u32>(inst.imm & 0xfff);
+
+    // For the immediate forms the rs1 field is a 5-bit unsigned value, not a
+    // register number.
+    const bool immediate_form = (inst.funct3 & 0x4) != 0;
+    const u64  src = immediate_form ? static_cast<u64>(inst.rs1) : read_reg(inst.rs1);
+
+    switch (inst.funct3 & 0x3) {
+        case 0x1: {  // CSRRW / CSRRWI - swap
+            u64 old = 0;
+            if (inst.rd != 0) {
+                Result<u64> r = csr_read(addr);
+                if (!r) return Status::bad(r.trap);
+                old = r.value;
+            } else {
+                // rd == x0: the read is suppressed, but the write still has to
+                // pass its access checks.
+                if (!csrs.exists(addr) || priv < csr::min_privilege(addr)) {
+                    return Status::bad(Exception::IllegalInstruction, 0);
+                }
+            }
+
+            Status st = csr_write(addr, src);
+            if (!st) return st;
+
+            write_reg(inst.rd, old);
+            return Status::good();
+        }
+
+        case 0x2:    // CSRRS / CSRRSI - set bits
+        case 0x3: {  // CSRRC / CSRRCI - clear bits
+            Result<u64> r = csr_read(addr);
+            if (!r) return Status::bad(r.trap);
+
+            // A zero source means "read only": no write is attempted at all,
+            // so this is legal even on a read-only CSR.
+            if (src != 0) {
+                const u64 next = ((inst.funct3 & 0x3) == 0x2) ? (r.value | src)
+                                                              : (r.value & ~src);
+                Status st = csr_write(addr, next);
+                if (!st) return st;
+            }
+
+            write_reg(inst.rd, r.value);
+            return Status::good();
+        }
+
+        default:
             return Status::bad(Exception::IllegalInstruction, inst.raw);
     }
 }
@@ -558,8 +845,20 @@ void Cpu::trace_inst(const DecodedInst& inst) const {
             reg("rs2", inst.rs2);
             break;
         case Format::I:
-            // ECALL/EBREAK have no meaningful operands at all.
+            // ECALL/EBREAK/MRET/WFI have no meaningful operands at all.
             if (inst.opcode == opcodes::SYSTEM && inst.funct3 == 0) break;
+            // For a CSR instruction the immediate is a CSR number, and the rs1
+            // field may be a 5-bit immediate rather than a register.
+            if (inst.opcode == opcodes::SYSTEM) {
+                reg("rd", inst.rd);
+                os << " csr=0x" << std::hex << (inst.imm & 0xfff) << std::dec;
+                if (inst.funct3 & 0x4) {
+                    os << " uimm=" << inst.rs1;
+                } else {
+                    reg("rs1", inst.rs1);
+                }
+                break;
+            }
             reg("rd", inst.rd);
             reg("rs1", inst.rs1);
             // For shifts the useful field is the shift amount, not the raw

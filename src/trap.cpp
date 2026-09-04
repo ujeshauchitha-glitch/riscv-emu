@@ -19,3 +19,12 @@ const char* exception_name(Exception e) {
     }
     return "unknown exception";
 }
+
+const char* privilege_name(u32 priv) {
+    switch (priv) {
+        case PRIV_USER:       return "U";
+        case PRIV_SUPERVISOR: return "S";
+        case PRIV_MACHINE:    return "M";
+        default:              return "?";
+    }
+}

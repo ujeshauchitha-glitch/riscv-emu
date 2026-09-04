@@ -205,11 +205,23 @@ const char* mnemonic(const DecodedInst& inst) {
             return (inst.funct3 == 0x1) ? "fence.i" : "fence";
 
         case opcodes::SYSTEM:
-            if (inst.funct3 != 0x0) return "unimp";  // CSR ops: phase 2
-            switch (inst.imm & 0xfff) {
-                case 0x000: return "ecall";
-                case 0x001: return "ebreak";
-                default:    return "unimp";
+            switch (inst.funct3) {
+                case 0x0:
+                    switch (inst.imm & 0xfff) {
+                        case 0x000: return "ecall";
+                        case 0x001: return "ebreak";
+                        case 0x102: return "sret";    // phase 6
+                        case 0x105: return "wfi";
+                        case 0x302: return "mret";
+                        default:    return "unimp";
+                    }
+                case 0x1: return "csrrw";
+                case 0x2: return "csrrs";
+                case 0x3: return "csrrc";
+                case 0x5: return "csrrwi";
+                case 0x6: return "csrrsi";
+                case 0x7: return "csrrci";
+                default:  return "unimp";
             }
 
         default:

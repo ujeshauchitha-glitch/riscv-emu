@@ -13,8 +13,8 @@ modes. Linux additionally needs the C and F/D extensions, a device tree, and SBI
 | 3 | Fetch / decode / ADDI | ✅ done |
 | 0 | Foundation restructure + defect fixes | ✅ done |
 | 1 | Complete RV64I | ✅ done |
-| 2 | Zicsr + M-mode traps | ⬜ next |
-| 3 | M and A extensions | ⬜ |
+| 2 | Zicsr + M-mode traps | ✅ done |
+| 3 | M and A extensions | ⬜ next |
 | 4 | ELF loader, UART, CLINT — first output | ⬜ |
 | 5 | riscv-tests + CI | ⬜ |
 | 6 | S-mode + Sv39 MMU | ⬜ |
@@ -109,3 +109,39 @@ CTest — validating the decoder against an independent implementation rather th
 against our own encoders.
 
 **Docs:** [`01-rv64i.md`](01-rv64i.md)
+
+## Phase 2: Zicsr + M-mode traps — done
+
+A trap now does what hardware does: records why it happened, saves enough state
+to return, and jumps to a handler the guest installed. `ECALL` behaves like a
+system call instead of halting the machine.
+
+**Added:** the CSR file (`mstatus`, `mtvec`, `mepc`, `mcause`, `mtval`,
+`mie`/`mip`, `misa`, `mhartid`, `mscratch`, `medeleg`/`mideleg`, counters), the
+six CSR instructions, `MRET`, `WFI`, trap entry and dispatch, and interrupt
+delivery with spec priority ordering.
+
+**Fine print handled**
+
+- `mepc` points *at* a faulting instruction (so a page fault can retry) but at
+  the *not-yet-run* instruction for an interrupt. A syscall handler's
+  `addi mepc, mepc, 4` is the mechanism, not a quirk.
+- Interrupts are checked before the fetch, because an interrupt happens between
+  instructions rather than being caused by one.
+- In vectored `mtvec` mode only *interrupts* are vectored; exceptions still go
+  to the base address.
+- `CSRRW` with `rd == x0` suppresses the read; `CSRRS`/`CSRRC` with a zero
+  source suppress the write. Some CSRs have access side effects, so a
+  suppressed access that happened anyway would consume events. This is also why
+  `csrr` works on read-only CSRs.
+- Writes are masked per register: `mstatus` keeps only implemented bits,
+  `mepc` has its low bits hardwired to zero, `misa` ignores writes, `mtvec`
+  coerces a reserved mode.
+- Unimplemented CSRs trap — that is how software probes for features.
+- While `mtvec` is zero a trap stops the emulator rather than looping to
+  address 0 forever. A debugging affordance, flagged as such.
+
+**Testing:** 50 unit-test checks, plus a 12-check trap self-test in
+`examples/trap_selftest.S` with a real handler, assembled by GNU `as`.
+
+**Docs:** [`02-csrs-and-traps.md`](02-csrs-and-traps.md)

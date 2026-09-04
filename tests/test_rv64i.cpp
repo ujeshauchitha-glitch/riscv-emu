@@ -1,5 +1,6 @@
 #include <vector>
 
+#include "csr.hpp"
 #include "machine.hpp"
 #include "test_util.hpp"
 
@@ -456,17 +457,17 @@ void test_not_yet_implemented_traps_rather_than_misexecuting() {
     CHECK(!st);
     CHECK(st.trap.cause == Exception::IllegalInstruction);
 
-    // CSR instructions share the SYSTEM opcode (funct3 != 0) - phase 2.
-    Machine n({i_type(opcodes::SYSTEM, 3, 0x1, 0, 0x300)});  // csrrw
-    const Status cs = n.cpu->step();
-    CHECK(!cs);
-    CHECK(cs.trap.cause == Exception::IllegalInstruction);
+    // CSR instructions and MRET share the SYSTEM opcode and were illegal in
+    // phase 1; phase 2 implements them, so they now execute. Their behaviour is
+    // covered in tests/test_csr.cpp.
+    Machine n({i_type(opcodes::SYSTEM, 3, 0x1, 0, csr::MSTATUS)});  // csrrw
+    CHECK(n.cpu->step());
 
-    // MRET is SYSTEM/funct3=0 but not ECALL or EBREAK - phase 2.
-    Machine o({i_type(opcodes::SYSTEM, 0, 0x0, 0, 0x302)});
-    const Status mr = o.cpu->step();
-    CHECK(!mr);
-    CHECK(mr.trap.cause == Exception::IllegalInstruction);
+    // SRET belongs to supervisor mode and is still illegal until phase 6.
+    Machine o({i_type(opcodes::SYSTEM, 0, 0x0, 0, 0x102)});
+    const Status sr = o.cpu->step();
+    CHECK(!sr);
+    CHECK(sr.trap.cause == Exception::IllegalInstruction);
 }
 
 // --- an end-to-end program --------------------------------------------------
