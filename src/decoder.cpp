@@ -178,8 +178,19 @@ const char* mnemonic(const DecodedInst& inst) {
             }
 
         case opcodes::OP:
-            // funct7 == 0x01 is the M extension, which arrives in phase 3.
-            if (inst.funct7 == 0x01) return "unimp";
+            if (inst.funct7 == 0x01) {  // M extension
+                switch (inst.funct3) {
+                    case 0x0: return "mul";
+                    case 0x1: return "mulh";
+                    case 0x2: return "mulhsu";
+                    case 0x3: return "mulhu";
+                    case 0x4: return "div";
+                    case 0x5: return "divu";
+                    case 0x6: return "rem";
+                    case 0x7: return "remu";
+                    default:  return "unimp";
+                }
+            }
             switch (inst.funct3) {
                 case 0x0: return (inst.funct7 == 0x20) ? "sub" : "add";
                 case 0x1: return "sll";
@@ -193,7 +204,16 @@ const char* mnemonic(const DecodedInst& inst) {
             }
 
         case opcodes::OP_32:
-            if (inst.funct7 == 0x01) return "unimp";
+            if (inst.funct7 == 0x01) {  // M extension, 32-bit forms
+                switch (inst.funct3) {
+                    case 0x0: return "mulw";
+                    case 0x4: return "divw";
+                    case 0x5: return "divuw";
+                    case 0x6: return "remw";
+                    case 0x7: return "remuw";
+                    default:  return "unimp";
+                }
+            }
             switch (inst.funct3) {
                 case 0x0: return (inst.funct7 == 0x20) ? "subw" : "addw";
                 case 0x1: return "sllw";
@@ -203,6 +223,25 @@ const char* mnemonic(const DecodedInst& inst) {
 
         case opcodes::MISC_MEM:
             return (inst.funct3 == 0x1) ? "fence.i" : "fence";
+
+        case opcodes::AMO: {
+            // funct5 (bits 31:27) picks the operation; funct3 picks the width.
+            const bool w = (inst.funct3 == 0x2);
+            switch ((inst.funct7 >> 2) & 0x1f) {
+                case 0x00: return w ? "amoadd.w"  : "amoadd.d";
+                case 0x01: return w ? "amoswap.w" : "amoswap.d";
+                case 0x02: return w ? "lr.w"      : "lr.d";
+                case 0x03: return w ? "sc.w"      : "sc.d";
+                case 0x04: return w ? "amoxor.w"  : "amoxor.d";
+                case 0x08: return w ? "amoor.w"   : "amoor.d";
+                case 0x0c: return w ? "amoand.w"  : "amoand.d";
+                case 0x10: return w ? "amomin.w"  : "amomin.d";
+                case 0x14: return w ? "amomax.w"  : "amomax.d";
+                case 0x18: return w ? "amominu.w" : "amominu.d";
+                case 0x1c: return w ? "amomaxu.w" : "amomaxu.d";
+                default:   return "unimp";
+            }
+        }
 
         case opcodes::SYSTEM:
             switch (inst.funct3) {

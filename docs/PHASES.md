@@ -14,8 +14,8 @@ modes. Linux additionally needs the C and F/D extensions, a device tree, and SBI
 | 0 | Foundation restructure + defect fixes | ✅ done |
 | 1 | Complete RV64I | ✅ done |
 | 2 | Zicsr + M-mode traps | ✅ done |
-| 3 | M and A extensions | ⬜ next |
-| 4 | ELF loader, UART, CLINT — first output | ⬜ |
+| 3 | M and A extensions | ✅ done |
+| 4 | ELF loader, UART, CLINT — first output | ⬜ next |
 | 5 | riscv-tests + CI | ⬜ |
 | 6 | S-mode + Sv39 MMU | ⬜ |
 | 7 | PLIC + virtio-blk — **boot xv6** | ⬜ |
@@ -145,3 +145,31 @@ delivery with spec priority ordering.
 `examples/trap_selftest.S` with a real handler, assembled by GNU `as`.
 
 **Docs:** [`02-csrs-and-traps.md`](02-csrs-and-traps.md)
+
+## Phase 3: M and A extensions — done
+
+`misa` now advertises RV64IMA. Both extensions are prerequisites for xv6.
+
+**Added:** `MUL`, `MULH`, `MULHSU`, `MULHU`, `DIV`, `DIVU`, `REM`, `REMU` and
+their `*W` forms; `LR`/`SC` in `.W`/`.D`; all nine AMOs in `.W`/`.D`.
+
+**Fine print handled**
+
+- RISC-V division *never traps*. Divide-by-zero and signed overflow have
+  specified results. `INT64_MIN / -1` is the case C++ cannot express — it is
+  undefined behaviour and raises SIGFPE on x86 — so it is special-cased before
+  the division happens.
+- `MULHSU` exists for multi-word arithmetic, where a bignum's limbs are unsigned
+  but the top one carries the sign.
+- A trap clears the LR/SC reservation. On a single hart nothing can break a
+  reservation, so every SC would otherwise succeed — but a trap is a context
+  switch, and a thread must not inherit another's reservation. Tested with a
+  control that isolates the trap as the cause.
+- The reservation is consumed by SC whether or not it succeeded.
+- Atomics must be naturally aligned, unlike ordinary loads and stores.
+- Signed and unsigned min/max AMOs disagree on the same bits.
+
+**Testing:** unit tests for every edge case above, plus a 15-check self-test in
+`examples/muldiv_atomic_selftest.S` ending with a working LR/SC spinlock.
+
+**Docs:** [`03-m-and-a.md`](03-m-and-a.md)

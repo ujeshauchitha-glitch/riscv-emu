@@ -41,6 +41,7 @@ set(RISCV_EMU_TESTS
   test_cpu
   test_rv64i
   test_csr
+  test_muldiv_atomic
 )
 
 foreach(test_name IN LISTS RISCV_EMU_TESTS)
@@ -73,6 +74,7 @@ if(RISCV_AS AND RISCV_LD AND RISCV_OBJCOPY)
   set(SELFTESTS
     "rv64i_selftest:rv64i:3fff"
     "trap_selftest:rv64i_zicsr:fff"
+    "muldiv_atomic_selftest:rv64ima_zicsr:7fff"
   )
 
   set(SELFTEST_OUTPUTS "")

@@ -7,13 +7,14 @@ No dependencies: a C++20 compiler and CMake ≥ 3.16 are all you need.
 
 ## Status
 
-**Phases 0-2 done, seven to go.** RV64I runs, and traps now dispatch to a
-handler the guest installs - so `ECALL` behaves like a system call rather than
-halting the machine. Both self-tests in `examples/` are assembled by the GNU
-assembler and pass under the emulator.
+**Phases 0-3 done, six to go.** The emulator implements RV64IMA with M-mode
+trap handling: the base integer set, multiply/divide, atomics, and CSRs with
+traps that dispatch to a handler the guest installs. Three self-tests in
+`examples/` are assembled by the GNU assembler and pass under the emulator,
+the last of them running a working LR/SC spinlock.
 
-Next up: the M extension (multiply/divide) and A extension (atomics). xv6's
-spinlocks are built on the atomics.
+Next up: an ELF loader, a UART and the CLINT - the first phase where a guest
+program can print something.
 
 ## What works today
 
@@ -24,8 +25,8 @@ spinlocks are built on the atomics.
 | Bus with memory-mapped I/O, DRAM at `0x8000_0000` | ✅ |
 | Trap causes and reporting | ✅ |
 | **Zicsr** — CSRs, `MRET`, `WFI`, trap dispatch, interrupts | ✅ complete |
-| M — multiply / divide | ⬜ phase 3 |
-| A — atomics, `LR`/`SC` | ⬜ phase 3 |
+| **M** — multiply / divide | ✅ complete |
+| **A** — atomics, `LR`/`SC` | ✅ complete |
 | Devices — UART, CLINT, PLIC, virtio | ⬜ phases 4, 7 |
 | S-mode + Sv39 virtual memory | ⬜ phase 6 |
 | C — compressed instructions | ⬜ phase 8 |
@@ -58,6 +59,7 @@ cmake --build build
 # Each stops on ebreak with one bit set in a0 per passing check.
 ./build/riscv_emu --dump build/rv64i_selftest.bin   # expect a0 = 0x3fff
 ./build/riscv_emu --dump build/trap_selftest.bin    # expect a0 = 0xfff
+./build/riscv_emu --dump build/muldiv_atomic_selftest.bin  # expect a0 = 0x7fff
 ```
 
 `--help` lists all options.
@@ -68,8 +70,9 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-Seven suites: unit tests for the decoder, the bus, the CPU, the RV64I
-instruction set and the CSR/trap machinery, plus two bare-metal self-tests
+Nine suites: unit tests for the decoder, the bus, the CPU, the RV64I
+instruction set, the CSR/trap machinery and the M/A extensions, plus three
+bare-metal self-tests
 assembled with a real RISC-V toolchain. The self-tests are skipped automatically
 when no toolchain is present - to enable them:
 
@@ -127,8 +130,8 @@ so a kernel that jumps into the weeds stops immediately with a clear cause.
 | 0 | Foundation: bus, decoder, trap plumbing | ✅ |
 | 1 | Complete RV64I | ✅ |
 | 2 | Zicsr + M-mode traps | ✅ |
-| 3 | M and A extensions | ⬜ next |
-| 4 | ELF loader, UART, CLINT — first real output | ⬜ |
+| 3 | M and A extensions | ✅ |
+| 4 | ELF loader, UART, CLINT — first real output | ⬜ next |
 | 5 | riscv-tests + CI | ⬜ |
 | 6 | S-mode + Sv39 MMU | ⬜ |
 | 7 | PLIC + virtio-blk — **boot xv6** | ⬜ |
@@ -152,6 +155,8 @@ Each phase ships an explainer alongside the code:
 - [`02-csrs-and-traps.md`](docs/02-csrs-and-traps.md) - what a CSR is, the exact
   trap-entry and `MRET` sequences, and why `mepc` points at a faulting
   instruction but past an interrupted one
+- [`03-m-and-a.md`](docs/03-m-and-a.md) - why RISC-V division never traps, and
+  why a trap has to break an LR/SC reservation
 
 ## Goals
 

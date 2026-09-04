@@ -98,9 +98,20 @@ public:
     std::ostream* trace_stream = nullptr;  // defaults to std::cerr
     u64           instret      = 0;        // instructions retired
 
+    // Clear any outstanding LR/SC reservation. Called on trap entry, because a
+    // context switch between an LR and its SC must make the SC fail - otherwise
+    // two threads could both believe they won the same lock.
+    void clear_reservation() { reservation_valid_ = false; }
+
 private:
     Bus& bus_;
     u64  next_pc_ = 0;
+
+    // The LR/SC reservation set. Real hardware reserves a cache-line-sized
+    // "granule"; a single-hart emulator only needs the address, since nothing
+    // else can write memory behind our back.
+    bool reservation_valid_ = false;
+    u64  reservation_addr_  = 0;
 
     // One handler per major opcode group.
     Status execute_op_imm(const DecodedInst& inst);     // ADDI, SLTI, ... SRAI
@@ -113,6 +124,9 @@ private:
     Status execute_jal(const DecodedInst& inst);
     Status execute_jalr(const DecodedInst& inst);
     Status execute_system(const DecodedInst& inst);     // ECALL, EBREAK, CSRs
+    Status execute_mul_div(const DecodedInst& inst);    // M: MUL, DIV, REM
+    Status execute_mul_div_32(const DecodedInst& inst); // M: MULW, DIVW, REMW
+    Status execute_amo(const DecodedInst& inst);        // A: LR/SC and the AMOs
     Status execute_csr(const DecodedInst& inst);        // CSRRW/S/C and imm forms
     Status execute_mret(const DecodedInst& inst);
 

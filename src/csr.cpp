@@ -20,10 +20,9 @@ constexpr u64 MSTATUS_MASK = csr::MSTATUS_MIE | csr::MSTATUS_MPIE | csr::MSTATUS
 }  // namespace
 
 CsrFile::CsrFile() {
-    // misa advertises the ISA. Only I is implemented so far; M and A join it in
-    // phase 3, C and F/D in phase 8. Guest code reads this to decide what it
-    // may use, so it must not claim more than we deliver.
-    raw_[csr::MISA] = MISA_MXL_64 | misa_ext('I');
+    // misa advertises the ISA. C and F/D join in phase 8. Guest code reads this
+    // to decide what it may use, so it must not claim more than we deliver.
+    raw_[csr::MISA] = MISA_MXL_64 | misa_ext('I') | misa_ext('M') | misa_ext('A');
 
     // A single hart, numbered 0. Every RISC-V system must have a hart 0, and
     // kernels use mhartid to pick which core runs the boot path.
