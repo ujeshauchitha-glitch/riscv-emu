@@ -168,10 +168,14 @@ void test_misa_reports_rv64i() {
     const u64 misa = m.reg(1);
     // MXL = 2 means RV64, in the top two bits.
     CHECK_EQ_U(misa >> 62, 2);
-    // 'I' is implemented; M and A are not, until phase 3.
+    // I, M and A are implemented; C and the floating-point extensions are not,
+    // until phase 8. misa must not claim more than the emulator delivers,
+    // because guest code reads it to decide what it may use.
     CHECK((misa & (1ull << ('I' - 'A'))) != 0);
-    CHECK((misa & (1ull << ('M' - 'A'))) == 0);
-    CHECK((misa & (1ull << ('A' - 'A'))) == 0);
+    CHECK((misa & (1ull << ('M' - 'A'))) != 0);
+    CHECK((misa & (1ull << ('A' - 'A'))) != 0);
+    CHECK((misa & (1ull << ('C' - 'A'))) == 0);
+    CHECK((misa & (1ull << ('D' - 'A'))) == 0);
 }
 
 // --- trap dispatch ----------------------------------------------------------
