@@ -56,6 +56,28 @@ constexpr u64 DRAM_BASE   = 0x8000'0000;
 constexpr u64 DRAM_SIZE_DEFAULT = 128ull * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
+// Privilege levels.
+//
+// RISC-V defines three: machine (the most privileged, always present),
+// supervisor (where a kernel runs), and user. The numeric values are fixed by
+// the spec and appear directly in mstatus.MPP and mstatus.SPP.
+//
+// Only machine mode exists until phase 6; these are defined now because the
+// trap path already has to record which mode it came from.
+// ---------------------------------------------------------------------------
+constexpr u32 PRIV_USER       = 0;
+constexpr u32 PRIV_SUPERVISOR = 1;
+constexpr u32 PRIV_MACHINE    = 3;
+
+// The mode an MRET returns to when it has nowhere less privileged to go. The
+// spec says to set mstatus.MPP to the least-privileged supported mode; with
+// only machine mode implemented, that is machine mode. Phase 6 changes this to
+// PRIV_USER once user mode exists.
+constexpr u32 PRIV_LEAST_SUPPORTED = PRIV_MACHINE;
+
+const char* privilege_name(u32 priv);
+
+// ---------------------------------------------------------------------------
 // Sign-extend the low `bits` bits of `value` to a full 64-bit signed integer.
 //
 // Immediates in RISC-V are stored in narrow fields (12, 13, 20, 21 bits) but

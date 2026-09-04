@@ -4,6 +4,7 @@
 #include <iosfwd>
 
 #include "bus.hpp"
+#include "csr.hpp"
 #include "decoder.hpp"
 #include "result.hpp"
 #include "types.hpp"
@@ -36,6 +37,11 @@ public:
     // Architectural state.
     std::array<u64, NUM_REGS> regs{};
     u64                       pc = DRAM_BASE;
+    CsrFile                   csrs;
+
+    // Current privilege level. A hart comes out of reset in machine mode.
+    // Nothing lowers it until phase 6 adds MRET-to-supervisor and user mode.
+    u32 priv = PRIV_MACHINE;
 
     // x0 is hardwired to zero: reads always yield 0 and writes are discarded.
     // Compilers rely on this constantly (`add x0, x0, x0` is the canonical NOP,
@@ -58,6 +64,29 @@ public:
     // Execute an already-decoded instruction. `next_pc_` is pre-set to pc + 4
     // by step(); control-transfer instructions overwrite it.
     Status execute(const DecodedInst& inst);
+
+    // Enter a trap handler: record the cause in the CSRs and vector to mtvec.
+    // This is what turns a trap from "the emulator stops" into "the guest's
+    // handler runs", which is the whole point of this phase.
+    void take_trap(const Trap& trap);
+    void take_interrupt(Interrupt intr);
+
+    // The highest-priority interrupt that is pending, enabled, and permitted by
+    // mstatus.MIE - or false if none is ready to fire.
+    bool next_interrupt(Interrupt& out) const;
+
+    // Traps are fatal while mtvec is still zero.
+    //
+    // A hart out of reset has mtvec = 0, so a trap would vector to address 0,
+    // fault on the unmapped fetch, and vector to 0 again - an infinite loop
+    // that looks exactly like a hang. Real hardware does precisely this, but it
+    // makes for a terrible debugging experience, so until a guest installs a
+    // handler we stop and report instead. Once mtvec is set, traps dispatch
+    // normally. Phase 4's syscon device gives guests a real way to exit.
+    bool trap_fatal_without_handler = true;
+
+    // The trap that stopped execution, when step() or run() returns a failure.
+    Trap last_trap{};
 
     void dump_registers(std::ostream& os) const;
 
@@ -83,7 +112,23 @@ private:
     Status execute_branch(const DecodedInst& inst);     // BEQ .. BGEU
     Status execute_jal(const DecodedInst& inst);
     Status execute_jalr(const DecodedInst& inst);
-    Status execute_system(const DecodedInst& inst);     // ECALL, EBREAK
+    Status execute_system(const DecodedInst& inst);     // ECALL, EBREAK, CSRs
+    Status execute_csr(const DecodedInst& inst);        // CSRRW/S/C and imm forms
+    Status execute_mret(const DecodedInst& inst);
+
+    // Read/write a CSR with the architectural access checks applied:
+    // unimplemented address, write to a read-only address, insufficient
+    // privilege. Each of those is an illegal-instruction trap.
+    Result<u64> csr_read(u32 addr) const;
+    Status      csr_write(u32 addr, u64 value);
+
+    // Shared trap-entry sequence for both exceptions and interrupts. They
+    // differ only in the cause code, the resume address, and whether vectored
+    // mtvec applies.
+    void enter_trap(u64 cause_code, u64 tval, u64 epc, bool is_interrupt);
+
+    // Dispatch a trap to the guest handler, or stop when none is installed.
+    Status handle_trap_or_stop(const Trap& trap);
 
     // Redirect control flow to `target`, or raise InstructionAddressMisaligned.
     //
