@@ -13,7 +13,17 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
 endif()
 
-add_compile_options(-Wall -Wextra)
+# -Wnon-virtual-dtor and -Woverloaded-virtual matter here because Device is a
+# polymorphic base that every peripheral derives from; -Wshadow catches the
+# classic emulator bug of a local quietly hiding a member with the same name.
+add_compile_options(
+  -Wall
+  -Wextra
+  -Wshadow
+  -Wnon-virtual-dtor
+  -Woverloaded-virtual
+  -Wnull-dereference
+)
 
 # The emulator core, built as a library so that both the executable and the
 # tests can link against exactly the same code.

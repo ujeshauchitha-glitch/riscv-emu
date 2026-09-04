@@ -269,16 +269,20 @@ seconds-long boot into a minutes-long one.
 
 ```bash
 cmake -S . -B build && cmake --build build
-./build/riscv_emu --trace          # built-in OP-IMM demo
 cd build && ctest --output-on-failure
 ```
 
-The demo runs one of each OP-IMM instruction — precisely the set that previously
-all executed as ADDI — and dumps the registers. The expected results are in the
-comments in `src/main.cpp`; `slti` should give 1 where `sltiu` gives 0, `srli`
-should give `0xf` where `srai` gives `-1`. It ends on `ebreak`, which correctly
-traps as an illegal instruction because `SYSTEM` instructions are not
-implemented until phase 2.
+`test_decoder`, `test_bus` and `test_cpu` are the suites this phase added, and
+they still run unchanged: the immediate encodings for all six formats, the bus's
+bounds checking and address decoding, and OP-IMM dispatching on `funct3` rather
+than executing everything as ADDI.
+
+> **A note on reading this document.** Each phase doc describes the state of the
+> project at the end of that phase, and is left as written. Later phases change
+> some of what is described here — the built-in demo in `src/main.cpp` is now a
+> UART program rather than the OP-IMM sequence phase 0 shipped, and `ebreak` no
+> longer traps as an illegal instruction because phase 2 implemented the SYSTEM
+> instructions. `README.md` always reflects the current state.
 
 ---
 

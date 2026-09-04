@@ -624,20 +624,17 @@ Status Cpu::execute_op_32(const DecodedInst& inst) {
 // ---------------------------------------------------------------------------
 // SYSTEM
 //
-// Only ECALL and EBREAK exist in base RV64I. The CSR instructions share this
-// opcode (funct3 != 0) and arrive in phase 2.
+// ECALL and EBREAK are the base RV64I members; the CSR instructions share this
+// opcode and are told apart by funct3 != 0.
 //
-// Both of these "fail" by design: they raise a trap, which is how they do their
-// job. ECALL is how every system call in every RISC-V OS is made - the guest
-// puts arguments in registers, executes ECALL, and the trap handler takes over.
-// Right now a trap simply stops the emulator, because there is nowhere for it
-// to go; phase 2 adds mtvec and the machinery to dispatch it to a handler.
+// Both ECALL and EBREAK "fail" by design: they raise a trap, which is how they
+// do their job. ECALL is how every system call in every RISC-V OS is made - the
+// guest puts arguments in registers, executes ECALL, and the handler at mtvec
+// takes over.
 // ---------------------------------------------------------------------------
 
 Status Cpu::execute_system(const DecodedInst& inst) {
-    if (inst.funct3 != 0x0) {
-        return execute_csr(inst);
-    }
+    if (inst.funct3 != 0x0) return execute_csr(inst);
 
     switch (inst.imm & 0xfff) {
         case 0x000:  // ECALL
