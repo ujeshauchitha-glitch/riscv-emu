@@ -121,11 +121,15 @@ illegal_site:
 
 # 11: a machine software interrupt fires once enabled, and mcause has its top
 #     bit set to distinguish an interrupt from an exception.
-    li      t2, 8                   # MSIE and MSIP are both bit 3
+    li      t2, 8                   # MSIE is bit 3
     csrw    mie, t2
     csrsi   mstatus, 8              # mstatus.MIE
-    csrw    mip, t2                 # raise it (the CLINT does this for real)
-    nop                             # the interrupt lands here
+    # The pending bit is raised through the CLINT, not by writing mip: MSIP and
+    # MTIP are read-only in mip because hardware owns them.
+    li      t3, 0x2000000           # CLINT_BASE + 0 = msip for hart 0
+    li      t4, 1
+    sw      t4, 0(t3)               # raise the software interrupt
+    nop                             # it lands here
     csrci   mstatus, 8              # disable again before checking
 
     li      t2, 3
@@ -161,7 +165,9 @@ handler:
     mret
 
 handle_interrupt:
-    csrw    mip, zero               # clear the pending bit so it stops firing
+    # Quiet the source at the device, which is the only way to clear MSIP.
+    li      t5, 0x2000000
+    sw      zero, 0(t5)
     mret
 
 done:

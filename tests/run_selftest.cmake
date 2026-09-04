@@ -12,10 +12,19 @@ execute_process(
 
 set(all "${out}${err}")
 
-# The emulator stops on the program's EBREAK, which it reports as a trap, so a
-# nonzero exit is expected here. What matters is the breakpoint cause and a0.
-if(NOT all MATCHES "breakpoint")
-  message(FATAL_ERROR "expected the program to stop on ebreak.\n${all}")
+# A program stops either on its EBREAK (reported as a trap) or by writing the
+# poweroff word to syscon. Anything else - a step-budget exhaustion, an
+# unexpected fault - means it did not finish.
+if(NOT all MATCHES "breakpoint" AND NOT all MATCHES "powered off")
+  message(FATAL_ERROR "program did not stop cleanly.\n${all}")
+endif()
+
+# Optional: check what the guest printed to the console.
+if(DEFINED EXPECT_OUTPUT AND NOT EXPECT_OUTPUT STREQUAL "")
+  if(NOT out MATCHES "${EXPECT_OUTPUT}")
+    message(FATAL_ERROR
+      "expected console output matching \"${EXPECT_OUTPUT}\".\n${all}")
+  endif()
 endif()
 
 if(NOT all MATCHES "x10 \\(a0\\)[ \t]*: 0x0*([0-9a-f]+)")

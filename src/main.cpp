@@ -7,23 +7,30 @@
 #include <vector>
 
 #include "bus.hpp"
+#include "clint.hpp"
 #include "cpu.hpp"
 #include "dram.hpp"
+#include "elf_loader.hpp"
+#include "syscon.hpp"
 #include "types.hpp"
+#include "uart.hpp"
 
 namespace {
 
 void print_usage(const char* argv0) {
     std::cerr
-        << "usage: " << argv0 << " [options] [image.bin]\n"
+        << "usage: " << argv0 << " [options] <image>\n"
         << "\n"
-        << "  Runs a flat binary image loaded at 0x" << std::hex << DRAM_BASE << std::dec << ".\n"
-        << "  With no image, runs a small built-in demo exercising the OP-IMM instructions.\n"
+        << "  Runs an ELF64 RISC-V image, or a flat binary loaded at 0x"
+        << std::hex << DRAM_BASE << std::dec << ".\n"
+        << "  The format is detected from the file's magic number.\n"
+        << "  With no image, runs a built-in demo that prints over the UART.\n"
         << "\n"
         << "options:\n"
         << "  --trace              print one line per retired instruction (stderr)\n"
-        << "  --max-steps N        stop after N instructions (default 1000000)\n"
+        << "  --max-steps N        stop after N instructions (default 100000000)\n"
         << "  --dram-size-mb N     guest RAM size in MiB (default 128)\n"
+        << "  --timer-divisor N    instructions per mtime tick (default 1)\n"
         << "  --dump               dump registers when execution stops\n"
         << "  -h, --help           show this message\n";
 }
@@ -31,69 +38,62 @@ void print_usage(const char* argv0) {
 bool read_file(const std::string& path, std::vector<u8>& out) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) return false;
-
     const std::streamsize len = f.tellg();
     if (len < 0) return false;
     f.seekg(0, std::ios::beg);
-
     out.resize(static_cast<std::size_t>(len));
     if (len > 0 && !f.read(reinterpret_cast<char*>(out.data()), len)) return false;
     return true;
 }
 
-// A short program used when no image is supplied. It exercises every OP-IMM
-// form, which is exactly the set this phase implements — and in particular the
-// seven instructions that the previous code silently executed as ADDI.
+// A built-in demo, used when no image is given: write "hello, RISC-V\n" to the
+// UART one byte at a time, then power off through syscon. This is the smallest
+// program that demonstrates what phase 4 added - a guest that can be heard from
+// and can stop on its own terms.
 //
-//   addi  t0, zero, 5        t0 = 5
-//   addi  t1, zero, -3       t1 = -3          (sign-extended immediate)
-//   slti  t2, t1, 0          t2 = 1           (signed: -3 < 0)
-//   sltiu s0, t1, 0          s0 = 0           (unsigned: huge, not < 0)
-//   xori  s1, t0, 0xf        s1 = 5 ^ 15 = 10
-//   ori   a0, t0, 0x8        a0 = 5 | 8  = 13
-//   andi  a1, t0, 0x6        a1 = 5 & 6  = 4
-//   slli  a2, t0, 4          a2 = 5 << 4 = 80
-//   srli  a3, t1, 60         a3 = 0xF          (logical: zeros shifted in)
-//   srai  a4, t1, 60         a4 = -1           (arithmetic: sign shifted in)
-//   ebreak                   stop (raises a breakpoint trap)
-const std::vector<u32> kDemoProgram = {
-    0x00500293,  // addi  t0, zero, 5
-    0xffd00313,  // addi  t1, zero, -3
-    0x00032393,  // slti  t2, t1, 0
-    0x00033413,  // sltiu s0, t1, 0
-    0x00f2c493,  // xori  s1, t0, 15
-    0x0082e513,  // ori   a0, t0, 8
-    0x0062f593,  // andi  a1, t0, 6
-    0x00429613,  // slli  a2, t0, 4
-    0x03c35693,  // srli  a3, t1, 60
-    0x43c35713,  // srai  a4, t1, 60
-    0x00100073,  // ebreak
-};
-
-std::vector<u8> encode_program(const std::vector<u32>& words) {
-    std::vector<u8> bytes;
-    bytes.reserve(words.size() * 4);
-    for (u32 w : words) {
-        bytes.push_back(static_cast<u8>(w & 0xff));
-        bytes.push_back(static_cast<u8>((w >> 8) & 0xff));
-        bytes.push_back(static_cast<u8>((w >> 16) & 0xff));
-        bytes.push_back(static_cast<u8>((w >> 24) & 0xff));
-    }
-    return bytes;
+//   la   t0, UART0        (lui + addi)
+//   la   t1, message
+//   loop: lbu t2, 0(t1); beqz t2 -> done; sb t2, 0(t0); addi t1,t1,1; j loop
+//   done: la t0, SYSCON; li t1, 0x5555; sw t1, 0(t0)
+std::vector<u32> demo_program() {
+    return {
+        //  0
+        0x100002b7,  // lui   t0, 0x10000    -> t0 = UART0_BASE (0x1000_0000)
+        // Note this uses auipc rather than `lui t1, 0x80000`. On RV64 LUI
+        // sign-extends from bit 31, so that would give 0xFFFFFFFF80000000, not
+        // 0x0000000080000000. auipc sidesteps it and is what real
+        // position-independent code uses anyway.
+        0x00000317,  // auipc t1, 0          -> t1 = address of this instruction
+        0x03c30313,  // addi  t1, t1, 60     -> the message, at byte offset 64
+        // loop (index 3):
+        0x00034383,  // lbu   t2, 0(t1)
+        0x00038863,  // beqz  t2, done       -> +16, to index 8
+        0x00728023,  // sb    t2, 0(t0)      -> the byte appears on the console
+        0x00130313,  // addi  t1, t1, 1
+        0xff1ff06f,  // j     loop           -> -16, back to index 3
+        // done (index 8):
+        0x001002b7,  // lui   t0, 0x100      -> t0 = SYSCON_BASE (0x0010_0000)
+        0x000053b7,  // lui   t2, 0x5        -> 0x5000
+        0x5553839b,  // addiw t2, t2, 0x555  -> 0x5555, the poweroff word
+        0x0072a023,  // sw    t2, 0(t0)      -> stop the machine
+        0x0000006f,  // j     .              (never reached)
+    };
 }
+
+const char* kDemoMessage = "hello, RISC-V\n";
 
 }  // namespace
 
 int main(int argc, char** argv) {
     std::string image_path;
-    bool        trace        = false;
-    bool        dump         = false;
-    u64         max_steps    = 1'000'000;
-    u64         dram_size_mb = 128;
+    bool        trace         = false;
+    bool        dump          = false;
+    u64         max_steps     = 100'000'000;
+    u64         dram_size_mb  = 128;
+    u64         timer_divisor = 1;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-
         auto next_value = [&](u64& out) -> bool {
             if (i + 1 >= argc) {
                 std::cerr << "error: " << arg << " requires a value\n";
@@ -103,63 +103,89 @@ int main(int argc, char** argv) {
             return true;
         };
 
-        if (arg == "-h" || arg == "--help") {
-            print_usage(argv[0]);
-            return 0;
-        } else if (arg == "--trace") {
-            trace = true;
-        } else if (arg == "--dump") {
-            dump = true;
-        } else if (arg == "--max-steps") {
-            if (!next_value(max_steps)) return 2;
-        } else if (arg == "--dram-size-mb") {
-            if (!next_value(dram_size_mb)) return 2;
-        } else if (!arg.empty() && arg[0] == '-') {
+        if (arg == "-h" || arg == "--help") { print_usage(argv[0]); return 0; }
+        else if (arg == "--trace") trace = true;
+        else if (arg == "--dump")  dump = true;
+        else if (arg == "--max-steps")     { if (!next_value(max_steps)) return 2; }
+        else if (arg == "--dram-size-mb")  { if (!next_value(dram_size_mb)) return 2; }
+        else if (arg == "--timer-divisor") { if (!next_value(timer_divisor)) return 2; }
+        else if (!arg.empty() && arg[0] == '-') {
             std::cerr << "error: unknown option " << arg << "\n";
             print_usage(argv[0]);
             return 2;
-        } else {
-            image_path = arg;
-        }
+        } else image_path = arg;
     }
 
-    if (dram_size_mb == 0) {
-        std::cerr << "error: --dram-size-mb must be at least 1\n";
+    if (dram_size_mb == 0 || timer_divisor == 0) {
+        std::cerr << "error: --dram-size-mb and --timer-divisor must be at least 1\n";
         return 2;
     }
 
-    // Build the machine: a bus with DRAM attached at 0x8000_0000.
-    Bus  bus;
-    auto dram = std::make_unique<Dram>(dram_size_mb * 1024 * 1024);
-    Dram* dram_ptr = dram.get();
-    if (!bus.attach(std::move(dram))) {
-        std::cerr << "error: failed to attach DRAM to the bus\n";
+    // --- build the machine ---
+    Bus bus;
+
+    auto  dram_owned = std::make_unique<Dram>(dram_size_mb * 1024 * 1024);
+    Dram* dram = dram_owned.get();
+    auto  uart_owned = std::make_unique<Uart>(std::cout);
+    auto  clint_owned = std::make_unique<Clint>();
+    Clint* clint = clint_owned.get();
+    auto  syscon_owned = std::make_unique<Syscon>();
+    Syscon* syscon = syscon_owned.get();
+
+    if (!bus.attach(std::move(dram_owned)) || !bus.attach(std::move(uart_owned)) ||
+        !bus.attach(std::move(clint_owned)) || !bus.attach(std::move(syscon_owned))) {
+        std::cerr << "error: failed to build the machine's address map\n";
         return 1;
     }
+    clint->ticks_per_instruction = 1;
 
-    std::vector<u8> image;
+    // --- load the image ---
+    u64 entry = DRAM_BASE;
     if (image_path.empty()) {
-        image = encode_program(kDemoProgram);
-        std::cerr << "no image given; running built-in OP-IMM demo\n";
-    } else if (!read_file(image_path, image)) {
-        std::cerr << "error: cannot read image '" << image_path << "'\n";
-        return 1;
-    }
-
-    if (!dram_ptr->load_image(DRAM_BASE, image)) {
-        std::cerr << "error: image (" << image.size() << " bytes) does not fit in "
-                  << dram_size_mb << " MiB of DRAM\n";
-        return 1;
+        std::vector<u8> bytes;
+        for (u32 w : demo_program()) {
+            for (int b = 0; b < 4; ++b) bytes.push_back(static_cast<u8>((w >> (8 * b)) & 0xff));
+        }
+        bytes.resize(64, 0);   // the message lives at offset 64
+        for (const char* p = kDemoMessage; *p; ++p) bytes.push_back(static_cast<u8>(*p));
+        bytes.push_back(0);
+        dram->load_image(DRAM_BASE, bytes);
+        std::cerr << "no image given; running the built-in UART demo\n";
+    } else {
+        std::vector<u8> bytes;
+        if (!read_file(image_path, bytes)) {
+            std::cerr << "error: cannot read image '" << image_path << "'\n";
+            return 1;
+        }
+        if (is_elf(bytes)) {
+            const LoadedImage img = load_elf(bytes, bus);
+            if (!img.ok) {
+                std::cerr << "error: " << img.error << "\n";
+                return 1;
+            }
+            entry = img.entry;
+        } else if (!dram->load_image(DRAM_BASE, bytes)) {
+            std::cerr << "error: image (" << bytes.size() << " bytes) does not fit in "
+                      << dram_size_mb << " MiB of DRAM\n";
+            return 1;
+        }
     }
 
     Cpu cpu(bus);
-    cpu.trace = trace;
-    cpu.pc    = DRAM_BASE;
+    cpu.trace  = trace;
+    cpu.pc     = entry;
+    cpu.clint  = clint;
+    cpu.syscon = syscon;
+    clint->ticks_per_instruction = timer_divisor;
 
     u64    retired = 0;
     Status st      = cpu.run(max_steps, &retired);
 
-    if (!st) {
+    if (cpu.halted) {
+        std::cerr << "\nmachine powered off after " << retired << " instruction(s)";
+        if (syscon->exit_code() != 0) std::cerr << " (exit code " << syscon->exit_code() << ")";
+        std::cerr << "\n";
+    } else if (!st) {
         std::cerr << "\nstopped after " << retired << " instruction(s): "
                   << exception_name(st.trap.cause)
                   << " (cause " << st.trap.cause_code()
@@ -169,12 +195,8 @@ int main(int argc, char** argv) {
         std::cerr << "\nstep budget exhausted after " << retired << " instruction(s)\n";
     }
 
-    // Until phase 2 gives us real trap handling, any trap ends the run, so a
-    // register dump is the only way to see what happened. Show it by default
-    // for the built-in demo.
-    if (dump || image_path.empty()) {
-        cpu.dump_registers(std::cout);
-    }
+    if (dump) cpu.dump_registers(std::cout);
 
+    if (cpu.halted) return static_cast<int>(syscon->exit_code());
     return st ? 0 : 1;
 }
