@@ -7,12 +7,13 @@ No dependencies: a C++20 compiler and CMake ≥ 3.16 are all you need.
 
 ## Status
 
-**Phases 0 and 1 done, eight to go.** The full RV64I base integer instruction
-set runs, and the emulator executes real compiled code — `examples/rv64i_selftest.S` is
-assembled by the GNU assembler and passes all 14 of its checks.
+**Phases 0-2 done, seven to go.** RV64I runs, and traps now dispatch to a
+handler the guest installs - so `ECALL` behaves like a system call rather than
+halting the machine. Both self-tests in `examples/` are assembled by the GNU
+assembler and pass under the emulator.
 
-Next up: control and status registers and M-mode trap handling, so `ECALL`
-dispatches to a handler instead of halting the machine.
+Next up: the M extension (multiply/divide) and A extension (atomics). xv6's
+spinlocks are built on the atomics.
 
 ## What works today
 
@@ -22,7 +23,7 @@ dispatches to a handler instead of halting the machine.
 | Six-format instruction decoder | ✅ |
 | Bus with memory-mapped I/O, DRAM at `0x8000_0000` | ✅ |
 | Trap causes and reporting | ✅ |
-| Zicsr — CSRs, `MRET`, trap dispatch | ⬜ phase 2 |
+| **Zicsr** — CSRs, `MRET`, `WFI`, trap dispatch, interrupts | ✅ complete |
 | M — multiply / divide | ⬜ phase 3 |
 | A — atomics, `LR`/`SC` | ⬜ phase 3 |
 | Devices — UART, CLINT, PLIC, virtio | ⬜ phases 4, 7 |
@@ -53,9 +54,10 @@ cmake --build build
 # Run a flat binary image, loaded at 0x8000_0000
 ./build/riscv_emu path/to/image.bin
 
-# The bare-metal self-test (built when a RISC-V toolchain is installed).
-# It stops on ebreak with a0 = 0x3fff, one bit per passing check.
-./build/riscv_emu --dump build/rv64i_selftest.bin
+# The bare-metal self-tests (built when a RISC-V toolchain is installed).
+# Each stops on ebreak with one bit set in a0 per passing check.
+./build/riscv_emu --dump build/rv64i_selftest.bin   # expect a0 = 0x3fff
+./build/riscv_emu --dump build/trap_selftest.bin    # expect a0 = 0xfff
 ```
 
 `--help` lists all options.
@@ -66,10 +68,10 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-Five suites: three unit-test binaries covering the decoder, the bus and the CPU;
-a 95-check RV64I suite; and a bare-metal self-test assembled with a real RISC-V
-toolchain. The last is skipped automatically when no toolchain is present — to
-enable it:
+Seven suites: unit tests for the decoder, the bus, the CPU, the RV64I
+instruction set and the CSR/trap machinery, plus two bare-metal self-tests
+assembled with a real RISC-V toolchain. The self-tests are skipped automatically
+when no toolchain is present - to enable them:
 
 ```bash
 apt-get install gcc-riscv64-unknown-elf
@@ -93,6 +95,7 @@ include/          src/
   dram.hpp          Guest RAM at 0x8000_0000                 dram.cpp
   decoder.hpp       u32 -> DecodedInst                       decoder.cpp
   cpu.hpp           Registers, fetch / decode / execute      cpu.cpp
+  csr.hpp           Control and status registers             csr.cpp
                     Command line                             main.cpp
 
 examples/         Bare-metal assembly + linker script
@@ -123,8 +126,8 @@ so a kernel that jumps into the weeds stops immediately with a clear cause.
 |---|---|---|
 | 0 | Foundation: bus, decoder, trap plumbing | ✅ |
 | 1 | Complete RV64I | ✅ |
-| 2 | Zicsr + M-mode traps | ⬜ next |
-| 3 | M and A extensions | ⬜ |
+| 2 | Zicsr + M-mode traps | ✅ |
+| 3 | M and A extensions | ⬜ next |
 | 4 | ELF loader, UART, CLINT — first real output | ⬜ |
 | 5 | riscv-tests + CI | ⬜ |
 | 6 | S-mode + Sv39 MMU | ⬜ |
@@ -146,6 +149,9 @@ Each phase ships an explainer alongside the code:
 - [`01-rv64i.md`](docs/01-rv64i.md) — the instruction set, and the RV64 fine
   print that is easy to get wrong (`*W` sign extension, 6- vs 5-bit shift
   amounts, where a misaligned-jump trap is reported)
+- [`02-csrs-and-traps.md`](docs/02-csrs-and-traps.md) - what a CSR is, the exact
+  trap-entry and `MRET` sequences, and why `mepc` points at a faulting
+  instruction but past an interrupted one
 
 ## Goals
 

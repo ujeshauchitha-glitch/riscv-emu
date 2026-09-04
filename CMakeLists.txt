@@ -20,6 +20,7 @@ add_compile_options(-Wall -Wextra)
 add_library(riscv_core STATIC
   src/bus.cpp
   src/cpu.cpp
+  src/csr.cpp
   src/decoder.cpp
   src/dram.cpp
   src/trap.cpp
@@ -39,6 +40,7 @@ set(RISCV_EMU_TESTS
   test_bus
   test_cpu
   test_rv64i
+  test_csr
 )
 
 foreach(test_name IN LISTS RISCV_EMU_TESTS)
@@ -63,29 +65,47 @@ find_program(RISCV_LD      NAMES riscv64-unknown-elf-ld riscv64-linux-gnu-ld)
 find_program(RISCV_OBJCOPY NAMES riscv64-unknown-elf-objcopy riscv64-linux-gnu-objcopy)
 
 if(RISCV_AS AND RISCV_LD AND RISCV_OBJCOPY)
-  set(SELFTEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/examples/rv64i_selftest.S)
-  set(SELFTEST_LD  ${CMAKE_CURRENT_SOURCE_DIR}/examples/link.ld)
-  set(SELFTEST_BIN ${CMAKE_CURRENT_BINARY_DIR}/rv64i_selftest.bin)
+  set(SELFTEST_LD ${CMAKE_CURRENT_SOURCE_DIR}/examples/link.ld)
 
-  add_custom_command(
-    OUTPUT ${SELFTEST_BIN}
-    COMMAND ${RISCV_AS} -march=rv64i -mabi=lp64 -o rv64i_selftest.o ${SELFTEST_SRC}
-    COMMAND ${RISCV_LD} --no-warn-rwx-segments -T ${SELFTEST_LD} -o rv64i_selftest.elf rv64i_selftest.o
-    COMMAND ${RISCV_OBJCOPY} -O binary rv64i_selftest.elf ${SELFTEST_BIN}
-    DEPENDS ${SELFTEST_SRC} ${SELFTEST_LD}
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    COMMENT "Assembling RV64I self-test"
+  # Each entry is  <name>:<march>:<expected a0 in hex>.
+  # a0 accumulates one bit per passing sub-test, so a clear bit in a failure
+  # message names exactly which check did not pass.
+  set(SELFTESTS
+    "rv64i_selftest:rv64i:3fff"
+    "trap_selftest:rv64i_zicsr:fff"
   )
-  add_custom_target(selftest_bin ALL DEPENDS ${SELFTEST_BIN})
 
-  # a0 accumulates one bit per sub-test; 0x3fff means all 14 passed.
-  add_test(NAME rv64i_selftest
-    COMMAND ${CMAKE_COMMAND}
-      -DEMU=$<TARGET_FILE:riscv_emu>
-      -DBIN=${SELFTEST_BIN}
-      -DEXPECT=3fff
-      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_selftest.cmake
-  )
+  set(SELFTEST_OUTPUTS "")
+  foreach(entry IN LISTS SELFTESTS)
+    string(REPLACE ":" ";" parts "${entry}")
+    list(GET parts 0 st_name)
+    list(GET parts 1 st_arch)
+    list(GET parts 2 st_expect)
+
+    set(st_src ${CMAKE_CURRENT_SOURCE_DIR}/examples/${st_name}.S)
+    set(st_bin ${CMAKE_CURRENT_BINARY_DIR}/${st_name}.bin)
+
+    add_custom_command(
+      OUTPUT ${st_bin}
+      COMMAND ${RISCV_AS} -march=${st_arch} -mabi=lp64 -o ${st_name}.o ${st_src}
+      COMMAND ${RISCV_LD} --no-warn-rwx-segments -T ${SELFTEST_LD} -o ${st_name}.elf ${st_name}.o
+      COMMAND ${RISCV_OBJCOPY} -O binary ${st_name}.elf ${st_bin}
+      DEPENDS ${st_src} ${SELFTEST_LD}
+      WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+      COMMENT "Assembling ${st_name}"
+    )
+    list(APPEND SELFTEST_OUTPUTS ${st_bin})
+
+    add_test(NAME ${st_name}
+      COMMAND ${CMAKE_COMMAND}
+        -DEMU=$<TARGET_FILE:riscv_emu>
+        -DBIN=${st_bin}
+        -DEXPECT=${st_expect}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_selftest.cmake
+    )
+  endforeach()
+
+  add_custom_target(selftest_bins ALL DEPENDS ${SELFTEST_OUTPUTS})
 else()
   message(STATUS "RISC-V toolchain not found; skipping the bare-metal self-test")
 endif()
