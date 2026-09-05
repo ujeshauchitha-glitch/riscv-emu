@@ -170,6 +170,21 @@ void test_flw_boxes_what_it_loads() {
     CHECK_EQ_U(m.cpu->fregs[0], nan_box(0x40490fdb));
 }
 
+void test_fld_loads_all_sixty_four_bits() {
+    // The other half of the pair: FLD moves a double, so there is no box to
+    // apply - every bit of the register is part of the number.
+    Machine m = fpu_machine({FLD(0, 2, 0)});
+    m.cpu->regs[2] = DRAM_BASE + 0x100;
+    CHECK(m.bus.store(DRAM_BASE + 0x100, 8, as_bits(-2.75)));
+    CHECK(m.cpu->step());
+    CHECK_EQ_U(m.cpu->fregs[0], as_bits(-2.75));
+
+    // A double loaded this way is *not* a valid single, which is exactly what
+    // NaN boxing is for: reading it as one yields the canonical NaN rather
+    // than the low half of a number that means something else.
+    CHECK_EQ_U(nan_unbox(m.cpu->fregs[0]), CANONICAL_NAN_F32);
+}
+
 // --- arithmetic -------------------------------------------------------------
 
 void test_basic_double_arithmetic() {
@@ -499,6 +514,7 @@ int main() {
     test_fmv_x_w_does_not_unbox();
     test_fsw_stores_only_the_low_half();
     test_flw_boxes_what_it_loads();
+    test_fld_loads_all_sixty_four_bits();
 
     test_basic_double_arithmetic();
     test_divide_by_zero_sets_the_flag_and_yields_infinity();
