@@ -136,6 +136,19 @@ for suite in $SUITES; do
 done
 
 printf '\n%s== summary ==%s\n' "$BOLD" "$OFF"
+
+# Running nothing is a failure, not a pass.
+#
+# If the clone silently produced no tests, or a suite directory went missing,
+# every counter stays at zero and the loop below would report "All 0 tests
+# passed" and exit 0 - a green CI that tested nothing, which is worse than a
+# visible failure because nobody can tell the difference from a real pass.
+if [ "$TOTAL" -eq 0 ]; then
+  printf '%s  No tests ran.%s Expected suites: %s\n' "$RED$BOLD" "$OFF" "$SUITES"
+  printf '  Check that %s contains the suite directories.\n' "$SRC_DIR/isa"
+  exit 1
+fi
+
 printf '  %d/%d passed' "$PASSED" "$TOTAL"
 [ "$EXCLUDED_COUNT" -gt 0 ] && printf ', %d excluded (unimplemented features)' "$EXCLUDED_COUNT"
 [ "$SKIPPED" -gt 0 ] && printf ', %d could not be built' "$SKIPPED"

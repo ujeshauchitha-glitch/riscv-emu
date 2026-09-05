@@ -1,9 +1,17 @@
 name: CI
 
 on:
+  # Only the default branch on push. Without the branch filter, a push to a
+  # branch that also has an open pull request triggers two identical runs -
+  # double the time and cost for no extra signal.
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+
+# A new push supersedes whatever was already running for the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-and-test:
@@ -11,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install the RISC-V toolchain
         run: |
