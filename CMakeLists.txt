@@ -85,11 +85,18 @@ endforeach()
 # against the encoders in tests/machine.hpp. Skipped silently when the toolchain
 # is absent, so the build never depends on it.
 #
-# Install with: apt-get install gcc-riscv64-unknown-elf
+# Install with:
+#   Debian/Ubuntu  apt install gcc-riscv64-unknown-elf
+#   Fedora         dnf install gcc-riscv64-elf binutils-riscv64-elf
+#   Arch           pacman -S riscv64-elf-gcc riscv64-elf-binutils
 # ---------------------------------------------------------------------------
-find_program(RISCV_AS      NAMES riscv64-unknown-elf-as riscv64-linux-gnu-as)
-find_program(RISCV_LD      NAMES riscv64-unknown-elf-ld riscv64-linux-gnu-ld)
-find_program(RISCV_OBJCOPY NAMES riscv64-unknown-elf-objcopy riscv64-linux-gnu-objcopy)
+# Toolchain prefixes differ by distribution: Debian and Ubuntu ship
+# riscv64-unknown-elf-, Fedora ships riscv64-elf-, and a Linux-target
+# cross-compiler (riscv64-linux-gnu-) assembles bare-metal code perfectly well
+# too. All three are accepted.
+find_program(RISCV_AS      NAMES riscv64-unknown-elf-as riscv64-elf-as riscv64-linux-gnu-as)
+find_program(RISCV_LD      NAMES riscv64-unknown-elf-ld riscv64-elf-ld riscv64-linux-gnu-ld)
+find_program(RISCV_OBJCOPY NAMES riscv64-unknown-elf-objcopy riscv64-elf-objcopy riscv64-linux-gnu-objcopy)
 
 if(RISCV_AS AND RISCV_LD AND RISCV_OBJCOPY)
   set(SELFTEST_LD ${CMAKE_CURRENT_SOURCE_DIR}/examples/link.ld)
