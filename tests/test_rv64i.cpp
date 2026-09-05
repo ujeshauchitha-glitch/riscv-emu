@@ -168,22 +168,36 @@ void test_jalr_rd_equals_rs1() {
     CHECK_EQ_U(m.reg(1), DRAM_BASE + kLoadImm64Steps * 4 + 4);
 }
 
-void test_misaligned_jump_traps_on_the_jump() {
-    // The trap must be reported on the jump instruction, with the *target* in
-    // tval, and the PC left on the jump - not on the target.
-    std::vector<u32> p;
-    load_imm64(p, 1, DRAM_BASE + 2);   // 2-byte aligned: illegal without C
-    p.push_back(JALR(2, 1, 0));
+void test_jump_alignment_with_the_c_extension() {
+    // Before the C extension a jump to a 2-byte-aligned address trapped with
+    // InstructionAddressMisaligned. With C, IALIGN is 16 bits and that target
+    // is perfectly legal - compilers emit them constantly.
+    {
+        std::vector<u32> p;
+        load_imm64(p, 1, DRAM_BASE + 2);
+        p.push_back(JALR(2, 1, 0));
 
-    Machine m(p);
-    const Status st = m.cpu->run(kLoadImm64Steps + 1, nullptr);
-    CHECK(!st);
-    CHECK(st.trap.cause == Exception::InstructionAddressMisaligned);
-    CHECK_EQ_U(st.trap.tval, DRAM_BASE + 2);
-    // PC still on the JALR itself.
-    CHECK_EQ_U(m.cpu->pc, DRAM_BASE + kLoadImm64Steps * 4);
-    // And the link register was not written.
-    CHECK_EQ_U(m.reg(2), 0);
+        Machine m(p);
+        const Status st = m.cpu->run(kLoadImm64Steps + 1, nullptr);
+        CHECK(st);
+        CHECK_EQ_U(m.cpu->pc, DRAM_BASE + 2);
+    }
+
+    // In fact, with IALIGN = 16 a misaligned *jump* has become impossible to
+    // express. JAL and the branches have bit 0 of their immediate hardwired to
+    // zero, and JALR clears bit 0 of its computed target - so no
+    // control-transfer instruction can produce an odd address at all. An odd
+    // value in the register is masked away rather than trapping:
+    {
+        std::vector<u32> p;
+        load_imm64(p, 1, DRAM_BASE + 3);
+        p.push_back(JALR(2, 1, 0));
+
+        Machine m(p);
+        const Status st = m.cpu->run(kLoadImm64Steps + 1, nullptr);
+        CHECK(st);
+        CHECK_EQ_U(m.cpu->pc, DRAM_BASE + 2);   // bit 0 cleared, not a trap
+    }
 }
 
 // --- branches ---------------------------------------------------------------
@@ -515,7 +529,7 @@ int main() {
     test_jalr();
     test_jalr_clears_bit_zero();
     test_jalr_rd_equals_rs1();
-    test_misaligned_jump_traps_on_the_jump();
+    test_jump_alignment_with_the_c_extension();
     test_branches();
     test_backward_branch_loop();
     test_store_then_load_all_widths();

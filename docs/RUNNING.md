@@ -288,10 +288,9 @@ emulator was built for.
 ./scripts/boot-xv6.sh
 ```
 
-That fetches xv6 into `third_party/` on first run, builds it for the extensions
-this emulator implements, checks the result really is free of compressed
-instructions, builds the emulator if it is not built already, and boots it with
-the filesystem image attached. After about half a minute:
+That fetches xv6 into `third_party/` on first run, builds it exactly as it ships,
+builds the emulator if it is not built already, and boots it with the filesystem
+image attached. After about half a minute:
 
 ```
 xv6 kernel is booting
@@ -345,56 +344,29 @@ it to a file and look at the tail, not the head:
 
 ### Doing it by hand
 
-The script is a convenience; nothing about it is required.
-
-xv6's stock build targets `-march=rv64gc`. The `c` there is the compressed
-16-bit instruction extension, which this emulator does not implement yet
-(phase 8), and `g` pulls in floating point as well. It has to be built for the
-extensions the emulator does have — and there is **no make variable for that**.
-The Makefile hardcodes `-march=rv64gc` into `CFLAGS`, and its rule for assembly
-files spells out `$(CC) -march=rv64gc` without including `$(CFLAGS)` at all, so
-`entry.S`, `swtch.S`, `kernelvec.S` and `trampoline.S` would still be assembled
-as `rv64gc` even if the C half were overridden. Patch both occurrences:
+The script is a convenience; nothing about it is required, and xv6 needs no
+special build flags — the emulator runs it exactly as it ships, compressed
+instructions and all.
 
 ```bash
 git clone https://github.com/mit-pdos/xv6-riscv
 cd xv6-riscv
-sed -i 's/-march=rv64gc/-march=rv64ima_zicsr_zifencei -mabi=lp64/g' Makefile
 make kernel/kernel fs.img
 ```
 
 You need the same `riscv64-unknown-elf` (or `riscv64-linux-gnu`) toolchain the
-self-tests use.
-
-To confirm the kernel really is free of compressed instructions before trying to
-boot it:
-
-```bash
-riscv64-unknown-elf-objdump -d -M no-aliases kernel/kernel | grep -c $'\tc\.'
-# 0
-```
-
-**The `-M no-aliases` is not optional.** Without it objdump prints a compressed
-instruction under its expanded name — `c.lui` shows up as plain `lui` — so the
-search finds nothing and the check passes happily on a kernel that is five
-thousand compressed instructions deep. Then the emulator stops on the third
-instruction of `_entry` and the reason is not obvious at all.
-
-A non-zero count means the build picked up the stock `-march` somewhere; check
-the patch applied to both lines, and `make clean` first.
-
-Then boot it. The kernel is an ELF64 image, so the loader places it by its
-program headers; `--disk` backs the virtio block device with the filesystem
-image:
+self-tests use. Then boot it — the kernel is an ELF64 image, so the loader
+places it by its program headers, and `--disk` backs the virtio block device
+with the filesystem image:
 
 ```bash
 ./build/riscv_emu --disk fs.img --max-steps 1000000000000 kernel/kernel
 ```
 
-The default step budget of 100 million is far too small — xv6 reaches the shell
-at roughly 500 million instructions, about 35 seconds at the emulator's ~15M
-instructions per second. Without a raised `--max-steps` the run stops partway
-through boot with `step budget exhausted`.
+The step budget matters: the default 100 million stops the run partway through
+boot, since xv6 reaches the shell at roughly 500 million instructions, about 35
+seconds at the emulator's ~15M instructions per second. Without a raised
+`--max-steps` the run ends with `step budget exhausted`.
 
 ### Driving it from a script
 
@@ -410,7 +382,7 @@ Give it time to boot before the input matters:
 
 | Stop message | Likely cause |
 |---|---|
-| `illegal instruction` early, at a low address | the kernel was built with `c` or `f`/`d` after all |
+| `illegal instruction` early, at a low address | the kernel uses floating point; build it soft-float, or wait for F/D |
 | `step budget exhausted` before the prompt | `--max-steps` too small; xv6 needs ~500M to reach the shell |
 | a fault right after `virtio_disk_init` | no `--disk`, or an unreadable image |
 | nothing at all, for a long time | normal — the first message appears a few seconds in |
@@ -423,7 +395,7 @@ Give it time to boot before the input matters:
 ./run-all.sh
 ```
 
-Builds from scratch, runs all thirteen suites, then runs the built-in demo and
+Builds from scratch, runs all fourteen suites, then runs the built-in demo and
 each self-test and reports what each produced. Useful after changing anything,
 and as a single command to check out a fresh clone with.
 

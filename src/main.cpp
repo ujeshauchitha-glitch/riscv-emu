@@ -35,7 +35,11 @@ void print_usage(const char* argv0) {
         << "  --timer-divisor N    instructions per mtime tick (default 1)\n"
         << "  --dump               dump registers when execution stops\n"
         << "  --disk FILE          back the virtio block device with FILE\n"
-        << "  -h, --help           show this message\n";
+        << "  -h, --help           show this message\n"
+        << "\n"
+        << "  To boot xv6, use scripts/boot-xv6.sh - it fetches and builds it\n"
+        << "  for you. Note that a real kernel needs a much larger --max-steps\n"
+        << "  than the default: xv6 reaches its shell at around 500 million.\n";
 }
 
 bool read_file(const std::string& path, std::vector<u8>& out) {

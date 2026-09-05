@@ -63,8 +63,13 @@ public:
     // actually retired.
     Status run(u64 max_steps, u64* steps_out = nullptr);
 
-    // Fetch the 32-bit instruction word at the current PC. Not const: an
-    // instruction fetch can fill the TLB.
+    // Fetch and decode the instruction at the current PC, which may be 16 or
+    // 32 bits wide. Not const: an instruction fetch can fill the TLB.
+    Result<DecodedInst> fetch_inst();
+
+    // The raw 32-bit instruction word at the current PC - the *expansion*, if
+    // the instruction there is compressed. Kept for tests, which want to check
+    // what a given address decodes to without running it.
     Result<u32> fetch();
 
     // Virtual memory. Translation is a no-op in machine mode and while satp
@@ -75,7 +80,8 @@ public:
     Result<u64> mem_load(u64 vaddr, unsigned size, AccessType type);
     Status      mem_store(u64 vaddr, unsigned size, u64 value);
 
-    // Execute an already-decoded instruction. `next_pc_` is pre-set to pc + 4
+    // Execute an already-decoded instruction. `next_pc_` is pre-set to the next
+    // instruction (pc + 2 or pc + 4)
     // by step(); control-transfer instructions overwrite it.
     Status execute(const DecodedInst& inst);
 

@@ -204,13 +204,17 @@ void test_reserved_shift_encoding_is_illegal() {
 }
 
 void test_misaligned_fetch_traps() {
+    // IALIGN is 16 bits with the C extension, so only an odd PC is misaligned.
+    // No jump can produce one - JALR clears bit 0 and the other transfers have
+    // it hardwired to zero - so this is a backstop for a PC set some other way,
+    // which is exactly what the test does.
     Machine m({enc_i(opcodes::OP_IMM, 1, 0, 0, 1)});
-    m.cpu->pc = DRAM_BASE + 2;  // not 4-byte aligned
+    m.cpu->pc = DRAM_BASE + 1;
 
     const Status st = m.cpu->step();
     CHECK(!st);
     CHECK(st.trap.cause == Exception::InstructionAddressMisaligned);
-    CHECK_EQ_U(st.trap.tval, DRAM_BASE + 2);
+    CHECK_EQ_U(st.trap.tval, DRAM_BASE + 1);
 }
 
 void test_fetch_from_unmapped_memory_traps() {
