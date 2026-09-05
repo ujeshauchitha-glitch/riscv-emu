@@ -124,14 +124,19 @@ void test_illegal_encodings_expand_to_zero() {
     CHECK(decompress(0x0002 | (0 << 7)) == 0);
 }
 
-void test_float_encodings_are_illegal_until_f_and_d_land() {
-    // C.FLD / C.FSD / C.FLDSP / C.FSDSP are valid compressed instructions, but
-    // they need the D extension, which this phase does not implement. They must
-    // trap rather than being expanded into something that happens to decode.
-    CHECK(decompress(0x2188) == 0);   // c.fld  fa0, 0(a1)
-    CHECK(decompress(0xa188) == 0);   // c.fsd  fa0, 0(a1)
-    CHECK(decompress(0x2102) == 0);   // c.fldsp fa0, 0(sp)
-    CHECK(decompress(0xa002) == 0);   // c.fsdsp fa0, 0(sp)
+void test_double_precision_compressed_loads_and_stores() {
+    // C.FLD / C.FSD / C.FLDSP / C.FSDSP move eight bytes, so they share their
+    // immediate layout with C.LD / C.SD / C.LDSP / C.SDSP - only the opcode of
+    // the expansion differs.
+    CHECK_EQ_U(decompress(0x2188), 0x0005b507);   // c.fld  fa0, 0(a1)
+    CHECK_EQ_U(decompress(0xa188), 0x00a5b027);   // c.fsd  fa0, 0(a1)
+    CHECK_EQ_U(decompress(0x2502), 0x00013507);   // c.fldsp fa0, 0(sp)
+    CHECK_EQ_U(decompress(0xa02a), 0x00a13027);   // c.fsdsp fa0, 0(sp)
+
+    // f0 is an ordinary register - nothing is hardwired to zero in the float
+    // file - so `c.fldsp f0` is legal where `c.ldsp x0` is a reserved encoding.
+    CHECK(decompress(0x2002) != 0);   // c.fldsp f0, 0(sp)
+    CHECK(decompress(0x6002) == 0);   // c.ldsp  x0, 0(sp)  - reserved
 }
 
 void test_instruction_length_is_read_from_the_low_bits() {
@@ -247,7 +252,7 @@ void test_illegal_compressed_instruction_reports_its_own_bits() {
 int main() {
     test_expansions_match_the_assembler();
     test_illegal_encodings_expand_to_zero();
-    test_float_encodings_are_illegal_until_f_and_d_land();
+    test_double_precision_compressed_loads_and_stores();
     test_instruction_length_is_read_from_the_low_bits();
     test_decode16_reports_length_and_original_encoding();
     test_compressed_program_executes_and_advances_two_bytes();

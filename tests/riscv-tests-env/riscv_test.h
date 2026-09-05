@@ -38,6 +38,21 @@
 #define RVTEST_RV32U  .macro init; .endm
 #define RVTEST_RV32M  .macro init; .endm
 
+// The floating-point suites need the FPU switched on before their first
+// instruction. mstatus.FS comes out of reset as Off, and while it is Off every
+// floating-point instruction - including the ones the test is about to run to
+// set up its own state - raises an illegal-instruction trap. Setting it to
+// Initial is what a kernel does when it first hands the FPU to a process.
+#define RVTEST_ENABLE_FPU                                                      \
+        li      t0, MSTATUS_FS;                                                \
+        csrs    mstatus, t0;                                                   \
+        csrwi   fcsr, 0;
+
+#define RVTEST_RV64UF  .macro init; RVTEST_ENABLE_FPU; .endm
+#define RVTEST_RV64UD  .macro init; RVTEST_ENABLE_FPU; .endm
+#define RVTEST_RV32UF  .macro init; RVTEST_ENABLE_FPU; .endm
+#define RVTEST_RV32UD  .macro init; RVTEST_ENABLE_FPU; .endm
+
 // Drop into supervisor mode via MRET, delegating every trap so the test's own
 // supervisor handler sees them rather than machine mode intercepting first.
 #define RVTEST_ENTER_SUPERVISOR                                                \
@@ -170,6 +185,7 @@ fromhost: .dword 0;
 #define MSTATUS_MPIE  0x00000080
 #define MSTATUS_SPP   0x00000100
 #define MSTATUS_MPP   0x00001800
+#define MSTATUS_FS    0x00006000
 #define MSTATUS_MPRV  0x00020000
 #define MSTATUS_SUM   0x00040000
 #define MSTATUS_MXR   0x00080000

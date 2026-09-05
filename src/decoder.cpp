@@ -55,6 +55,7 @@ i64 imm_j(u32 raw) {
 Format format_for_opcode(u32 opcode) {
     switch (opcode) {
         case opcodes::LOAD:
+        case opcodes::LOAD_FP:
         case opcodes::MISC_MEM:
         case opcodes::OP_IMM:
         case opcodes::OP_IMM_32:
@@ -63,6 +64,7 @@ Format format_for_opcode(u32 opcode) {
             return Format::I;
 
         case opcodes::STORE:
+        case opcodes::STORE_FP:
             return Format::S;
 
         case opcodes::BRANCH:
@@ -78,6 +80,15 @@ Format format_for_opcode(u32 opcode) {
         case opcodes::OP:
         case opcodes::OP_32:
         case opcodes::AMO:
+        // The floating-point operations reuse the R-type field layout. The
+        // fused multiply-adds add a fourth register in what would be funct7's
+        // top five bits (the spec calls this R4-type), which the CPU reads out
+        // of `raw` directly rather than growing the struct for one family.
+        case opcodes::OP_FP:
+        case opcodes::MADD:
+        case opcodes::MSUB:
+        case opcodes::NMSUB:
+        case opcodes::NMADD:
             return Format::R;
 
         default:
@@ -215,11 +226,22 @@ u32 decompress(u16 h) {
                             (bits(h, 6, 6) << 2);
             return enc_i(opcodes::LOAD, rd_p, 0x2, rs1_p, imm);
         }
+        case 1: {
+            // C.FLD: fld rd', offset(rs1').  Same immediate layout as C.LD -
+            // both move eight bytes, so both scale their offset the same way.
+            const u32 imm = (bits(h, 6, 5) << 6) | (bits(h, 12, 10) << 3);
+            return enc_i(opcodes::LOAD_FP, rd_p, 0x3, rs1_p, imm);
+        }
         case 3: {
             // C.LD: ld rd', offset(rs1')
             //   offset[5:3] = inst[12:10], [7:6] = inst[6:5]
             const u32 imm = (bits(h, 6, 5) << 6) | (bits(h, 12, 10) << 3);
             return enc_i(opcodes::LOAD, rd_p, 0x3, rs1_p, imm);
+        }
+        case 5: {
+            // C.FSD: fsd rs2', offset(rs1')
+            const u32 imm = (bits(h, 6, 5) << 6) | (bits(h, 12, 10) << 3);
+            return enc_s(opcodes::STORE_FP, 0x3, rs1_p, rd_p, imm);
         }
         case 6: {
             // C.SW: sw rs2', offset(rs1')
@@ -233,8 +255,7 @@ u32 decompress(u16 h) {
             return enc_s(opcodes::STORE, 0x3, rs1_p, rd_p, imm);
         }
         default:
-            // funct3 1 and 5 are C.FLD/C.FSD, which need the D extension; 4 is
-            // reserved. All illegal here.
+            // funct3 4 is reserved.
             return 0;
         }
 
@@ -354,6 +375,14 @@ u32 decompress(u16 h) {
                             (bits(h, 6, 4) << 2);
             return enc_i(opcodes::LOAD, rd_rs1, 0x2, 2, imm);
         }
+        case 1: {
+            // C.FLDSP: fld rd, offset(x2).  Same layout as C.LDSP, but with no
+            // reserved encoding: f0 is an ordinary register, so rd == 0 is
+            // perfectly legal here where `c.ldsp x0` is not.
+            const u32 imm = (bits(h, 4, 2) << 6) | (bits(h, 12, 12) << 5) |
+                            (bits(h, 6, 5) << 3);
+            return enc_i(opcodes::LOAD_FP, rd_rs1, 0x3, 2, imm);
+        }
         case 3: {
             // C.LDSP: ld rd, offset(x2)
             //   offset[5] = inst[12], [4:3] = inst[6:5], [8:6] = inst[4:2]
@@ -361,6 +390,11 @@ u32 decompress(u16 h) {
             const u32 imm = (bits(h, 4, 2) << 6) | (bits(h, 12, 12) << 5) |
                             (bits(h, 6, 5) << 3);
             return enc_i(opcodes::LOAD, rd_rs1, 0x3, 2, imm);
+        }
+        case 5: {
+            // C.FSDSP: fsd rs2, offset(x2).  Same layout as C.SDSP.
+            const u32 imm = (bits(h, 9, 7) << 6) | (bits(h, 12, 10) << 3);
+            return enc_s(opcodes::STORE_FP, 0x3, 2, rs2, imm);
         }
         case 4: {
             if (bits(h, 12, 12) == 0) {
@@ -391,7 +425,6 @@ u32 decompress(u16 h) {
             return enc_s(opcodes::STORE, 0x3, 2, rs2, imm);
         }
         default:
-            // 1 and 5 are C.FLDSP/C.FSDSP, which need the D extension.
             return 0;
         }
 

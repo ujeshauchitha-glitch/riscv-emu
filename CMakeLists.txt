@@ -33,6 +33,9 @@ add_library(riscv_core STATIC
   src/clint.cpp
   src/csr.cpp
   src/elf_loader.cpp
+  src/fpu.cpp
+  src/fdt.cpp
+  src/sbi.cpp
   src/mmu.cpp
   src/plic.cpp
   src/decoder.cpp
@@ -63,6 +66,8 @@ set(RISCV_EMU_TESTS
   test_supervisor
   test_interrupt_devices
   test_compressed
+  test_float
+  test_firmware
 )
 
 foreach(test_name IN LISTS RISCV_EMU_TESTS)

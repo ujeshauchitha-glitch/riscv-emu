@@ -14,6 +14,7 @@
 #include "plic.hpp"
 #include "syscon.hpp"
 #include "types.hpp"
+#include "fdt.hpp"
 #include "uart.hpp"
 #include "virtio.hpp"
 
@@ -35,6 +36,14 @@ void print_usage(const char* argv0) {
         << "  --timer-divisor N    instructions per mtime tick (default 1)\n"
         << "  --dump               dump registers when execution stops\n"
         << "  --disk FILE          back the virtio block device with FILE\n"
+        << "\n"
+        << "  Booting Linux (see docs/09-booting-linux.md):\n"
+        << "  --linux              start in supervisor mode with a generated device\n"
+        << "                       tree in a1 and SBI firmware services enabled,\n"
+        << "                       which is what a real bootloader hands a kernel\n"
+        << "  --bootargs STR       the kernel command line placed in /chosen\n"
+        << "  --initrd FILE        load an initramfs and point the kernel at it\n"
+        << "  --dump-dtb FILE      write the generated device tree out and exit\n"
         << "  -h, --help           show this message\n"
         << "\n"
         << "  To boot xv6, use scripts/boot-xv6.sh - it fetches and builds it\n"
@@ -99,6 +108,10 @@ int main(int argc, char** argv) {
     u64         max_steps     = 100'000'000;
     u64         dram_size_mb  = 128;
     u64         timer_divisor = 1;
+    bool        linux_boot    = false;
+    std::string bootargs      = "console=ttyS0 earlycon=sbi";
+    std::string initrd_path;
+    std::string dtb_out_path;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -117,6 +130,19 @@ int main(int argc, char** argv) {
         else if (arg == "--disk") {
             if (i + 1 >= argc) { std::cerr << "error: --disk requires a path\n"; return 2; }
             disk_path = argv[++i];
+        }
+        else if (arg == "--linux") linux_boot = true;
+        else if (arg == "--bootargs") {
+            if (i + 1 >= argc) { std::cerr << "error: --bootargs requires a value\n"; return 2; }
+            bootargs = argv[++i];
+        }
+        else if (arg == "--initrd") {
+            if (i + 1 >= argc) { std::cerr << "error: --initrd requires a path\n"; return 2; }
+            initrd_path = argv[++i];
+        }
+        else if (arg == "--dump-dtb") {
+            if (i + 1 >= argc) { std::cerr << "error: --dump-dtb requires a path\n"; return 2; }
+            dtb_out_path = argv[++i];
         }
         else if (arg == "--max-steps")     { if (!next_value(max_steps)) return 2; }
         else if (arg == "--dram-size-mb")  { if (!next_value(dram_size_mb)) return 2; }
@@ -207,6 +233,63 @@ int main(int argc, char** argv) {
         }
     }
 
+    // --- Linux boot: device tree, initramfs, and supervisor mode ---
+    //
+    // A RISC-V kernel expects to be entered by firmware with a0 = the hart ID
+    // and a1 = the address of a device tree. Everything it knows about the
+    // machine comes from that blob, so it is built here from the same constants
+    // the devices were attached with and cannot drift out of agreement.
+    u64 dtb_addr = 0;
+    u64 initrd_start = 0, initrd_end = 0;
+    const u64 dram_bytes = dram_size_mb * 1024 * 1024;
+
+    if (linux_boot || !dtb_out_path.empty()) {
+        // The initramfs goes high in memory, well clear of the kernel, and the
+        // device tree just below it. Putting them at the top rather than
+        // immediately after the kernel means their placement does not depend on
+        // how big the kernel turned out to be.
+        if (!initrd_path.empty()) {
+            std::vector<u8> initrd;
+            if (!read_file(initrd_path, initrd)) {
+                std::cerr << "error: cannot read initrd '" << initrd_path << "'\n";
+                return 1;
+            }
+            initrd_start = DRAM_BASE + dram_bytes - 64 * 1024 * 1024;
+            initrd_end   = initrd_start + initrd.size();
+            if (!dram->load_image(initrd_start, initrd)) {
+                std::cerr << "error: initrd does not fit in DRAM\n";
+                return 1;
+            }
+            std::cerr << "initrd: " << initrd_path << " (" << initrd.size()
+                      << " bytes at 0x" << std::hex << initrd_start << std::dec << ")\n";
+        }
+
+        const std::vector<u8> dtb =
+            Fdt::build(dram_bytes, bootargs, initrd_start, initrd_end);
+
+        if (!dtb_out_path.empty()) {
+            std::ofstream out(dtb_out_path, std::ios::binary);
+            if (!out) {
+                std::cerr << "error: cannot write '" << dtb_out_path << "'\n";
+                return 1;
+            }
+            out.write(reinterpret_cast<const char*>(dtb.data()),
+                      static_cast<std::streamsize>(dtb.size()));
+            std::cerr << "device tree written to " << dtb_out_path << " ("
+                      << dtb.size() << " bytes)\n";
+            if (!linux_boot) return 0;
+        }
+
+        // Two megabytes below the initramfs, or below the top of memory when
+        // there is none.
+        const u64 top = initrd_start != 0 ? initrd_start : DRAM_BASE + dram_bytes;
+        dtb_addr = (top - 2 * 1024 * 1024) & ~0xfffull;
+        if (!dram->load_image(dtb_addr, dtb)) {
+            std::cerr << "error: device tree does not fit in DRAM\n";
+            return 1;
+        }
+    }
+
     Cpu cpu(bus);
     cpu.trace  = trace;
     cpu.pc     = entry;
@@ -216,6 +299,26 @@ int main(int argc, char** argv) {
     cpu.plic     = plic;
     cpu.uart     = uart;
     cpu.uart_irq = UART0_IRQ;
+
+    if (linux_boot) {
+        // Enter the kernel the way OpenSBI would: in supervisor mode, with the
+        // hart ID in a0 and the device tree in a1, and with SBI available for
+        // the things supervisor mode cannot do for itself.
+        cpu.priv = PRIV_SUPERVISOR;
+        cpu.write_reg(10, 0);          // a0 = hartid
+        cpu.write_reg(11, dtb_addr);   // a1 = device tree
+        cpu.sbi_enabled = true;
+
+        // Linux installs stvec early but not instantly, and it delegates
+        // nothing to itself - so the "no handler installed" guard, which is a
+        // debugging aid rather than architectural behaviour, would fire on the
+        // first page fault of the boot. A kernel with real firmware underneath
+        // it would simply take the trap.
+        cpu.trap_fatal_without_handler = false;
+
+        std::cerr << "device tree at 0x" << std::hex << dtb_addr << std::dec
+                  << ", entering supervisor mode\n\n";
+    }
 
     // The console becomes bidirectional here. Everything before this point
     // could print; from now on a guest shell can also be typed at.
@@ -235,6 +338,9 @@ int main(int argc, char** argv) {
             std::cerr << "\nFAIL: test " << code << " failed, after " << retired
                       << " instruction(s)\n";
         }
+    } else if (cpu.sbi_shutdown) {
+        std::cerr << "\nguest requested shutdown through SBI, after " << retired
+                  << " instruction(s)\n";
     } else if (cpu.user_quit) {
         std::cerr << "\nleft the machine after " << retired << " instruction(s)\n";
     } else if (cpu.halted) {

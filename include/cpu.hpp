@@ -41,6 +41,11 @@ public:
 
     // Architectural state.
     std::array<u64, NUM_REGS> regs{};
+
+    // The floating-point register file, separate from the integer one. Each is
+    // 64 bits; a single-precision value lives NaN-boxed in the low half. Unlike
+    // x0, f0 is an ordinary register with no special behaviour.
+    std::array<u64, NUM_REGS> fregs{};
     u64                       pc = DRAM_BASE;
     CsrFile                   csrs;
 
@@ -126,6 +131,19 @@ public:
     // Set when a syscon poweroff or reboot stops the run.
     bool halted = false;
 
+    // SBI: firmware services for a supervisor.
+    //
+    // When this is on, an ECALL from supervisor mode is handled by the emulator
+    // as an SBI call rather than being delivered as a trap. That is the role a
+    // machine-mode firmware like OpenSBI plays on real hardware, and Linux
+    // cannot boot without it - setting the timer needs a machine-mode register
+    // a kernel has no access to.
+    //
+    // It is off by default, because a kernel that provides its own machine-mode
+    // code (xv6 does) must be allowed to see its own ecalls.
+    bool sbi_enabled  = false;
+    bool sbi_shutdown = false;   // set when the guest asked SBI to power off
+
     // Set when the run stopped because the user pressed Ctrl-A X, rather than
     // because the guest asked to power off. Both set `halted`; only this
     // distinguishes "you quit" from "the machine shut down".
@@ -185,6 +203,28 @@ private:
     Status execute_mret(const DecodedInst& inst);
     Status execute_sret(const DecodedInst& inst);
     Status execute_sfence_vma(const DecodedInst& inst);
+
+    // F and D. Loads and stores are separate from the integer ones because
+    // they write the other register file and must NaN-box a single.
+    Status execute_load_fp(const DecodedInst& inst);    // FLW, FLD
+    Status execute_store_fp(const DecodedInst& inst);   // FSW, FSD
+    Status execute_op_fp(const DecodedInst& inst);      // everything else
+    Status execute_fused_madd(const DecodedInst& inst); // FMADD .. FNMADD
+
+    // Every floating-point instruction begins by checking that the FPU is on -
+    // mstatus.FS != Off - and ends by marking the register file dirty if it
+    // wrote one. Forgetting either is a silent bug: the first lets user code
+    // use registers the kernel is not saving, the second lets a context switch
+    // skip saving registers that were modified.
+    Status require_fpu() const;
+    void   write_freg(u32 index, u64 value);
+
+    // Run one host floating-point operation with RISC-V's rounding mode and
+    // exception reporting: set the mode from the instruction's rm field (or
+    // fcsr when it says DYN), clear the host flags, call `op`, then accumulate
+    // whatever it raised into fflags.
+    template <typename Op>
+    Status with_rounding(const DecodedInst& inst, Op&& op);
 
     // The privilege a load or store runs at.
     //

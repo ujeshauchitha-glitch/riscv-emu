@@ -138,8 +138,19 @@ void test_mstatus_masks_unimplemented_bits() {
         csr::MSTATUS_MIE | csr::MSTATUS_MPIE | csr::MSTATUS_MPP |
         csr::MSTATUS_SIE | csr::MSTATUS_SPIE | csr::MSTATUS_SPP |
         csr::MSTATUS_MPRV | csr::MSTATUS_SUM | csr::MSTATUS_MXR |
-        csr::MSTATUS_TVM | csr::MSTATUS_TW | csr::MSTATUS_TSR;
+        csr::MSTATUS_TVM | csr::MSTATUS_TW | csr::MSTATUS_TSR |
+        csr::MSTATUS_FS | csr::MSTATUS_SD;
     CHECK_EQ_U(status & ~implemented, 0);
+
+    // SD is read-only and derived: it is set exactly when FS is Dirty, so it
+    // can never disagree with the field it summarises. A context switch reads
+    // that one bit rather than picking a field apart.
+    CHECK_EQ_U(status & csr::MSTATUS_FS, csr::MSTATUS_FS_DIRTY);
+    CHECK((status & csr::MSTATUS_SD) != 0);
+
+    m.cpu->csrs.write(csr::MSTATUS,
+                      (status & ~csr::MSTATUS_FS) | csr::MSTATUS_FS_CLEAN);
+    CHECK((m.cpu->csrs.mstatus() & csr::MSTATUS_SD) == 0);
 }
 
 void test_mtvec_mode_is_warl() {
@@ -176,16 +187,16 @@ void test_misa_reports_rv64i() {
     const u64 misa = m.reg(1);
     // MXL = 2 means RV64, in the top two bits.
     CHECK_EQ_U(misa >> 62, 2);
-    // I, M, A and C are implemented; the floating-point extensions are not yet.
-    // misa must not claim more than the emulator delivers, because guest code
-    // reads it to decide what it may use - and must not claim less, because a
-    // kernel that sees no C bit may refuse to run compressed code it emitted.
+    // I, M, A, C, F and D are all implemented. misa must not claim more than
+    // the emulator delivers, because guest code reads it to decide what it may
+    // use - and must not claim less, because a kernel that sees no C bit may
+    // refuse to run compressed code it emitted.
     CHECK((misa & (1ull << ('I' - 'A'))) != 0);
     CHECK((misa & (1ull << ('M' - 'A'))) != 0);
     CHECK((misa & (1ull << ('A' - 'A'))) != 0);
     CHECK((misa & (1ull << ('C' - 'A'))) != 0);
-    CHECK((misa & (1ull << ('F' - 'A'))) == 0);
-    CHECK((misa & (1ull << ('D' - 'A'))) == 0);
+    CHECK((misa & (1ull << ('F' - 'A'))) != 0);
+    CHECK((misa & (1ull << ('D' - 'A'))) != 0);
 }
 
 void test_epc_registers_keep_bit_1_with_the_c_extension() {
