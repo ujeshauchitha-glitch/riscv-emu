@@ -7,11 +7,21 @@ constexpr u64 MTIME_OFFSET    = 0xbff8;
 }  // namespace
 
 void Clint::update(CsrFile& csrs) const {
+    // The machine timer, compared against the CLINT's own mtimecmp.
     if (mtime_ >= mtimecmp_) csrs.raise_interrupt(csr::MIP_MTIP);
     else                     csrs.clear_interrupt(csr::MIP_MTIP);
 
     if (msip_ & 1) csrs.raise_interrupt(csr::MIP_MSIP);
     else           csrs.clear_interrupt(csr::MIP_MSIP);
+
+    // The supervisor timer (Sstc). When menvcfg.STCE lets S-mode have its own
+    // compare register, STIP is driven by it directly - so a kernel arms its
+    // next tick with one CSR write instead of calling into firmware. While STCE
+    // is clear, STIP belongs to software (M-mode posts it), so leave it alone.
+    if (csrs.sstc_enabled()) {
+        if (mtime_ >= csrs.read(csr::STIMECMP)) csrs.raise_interrupt(csr::MIP_STIP);
+        else                                    csrs.clear_interrupt(csr::MIP_STIP);
+    }
 }
 
 Result<u64> Clint::load(u64 offset, unsigned size_bytes) {

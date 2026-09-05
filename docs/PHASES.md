@@ -18,8 +18,8 @@ modes. Linux additionally needs the C and F/D extensions, a device tree, and SBI
 | 4 | ELF loader, UART, CLINT — first output | ✅ done |
 | 5 | riscv-tests + CI | ✅ done |
 | 6 | S-mode + Sv39 MMU | ✅ done |
-| 7 | PLIC + virtio-blk — **boot xv6** | ⬜ next |
-| 8 | Linux prerequisites (C, F/D, DTB, SBI) | ⬜ |
+| 7 | PLIC + virtio-blk — **boot xv6** | ✅ done |
+| 8 | Linux prerequisites (C, F/D, DTB, SBI) | ⬜ next |
 | 9 | **Boot Linux** | ⬜ |
 
 The first three phases were numbered before the roadmap existed. Phase 0 is
@@ -268,3 +268,68 @@ wrong `sepc`; the emulator was right, and the fault was the test environment's
 trap entry clobbering `t0` before the handler could read it.
 
 **Docs:** [`06-privilege-and-paging.md`](06-privilege-and-paging.md)
+
+## Phase 7: PLIC + virtio-blk — xv6 boots — done
+
+**The milestone.** xv6 boots to a shell prompt, the prompt can be typed at, and
+`ls` and `cat` read real data off a virtio disk image.
+
+```
+xv6 kernel is booting
+
+init: starting sh
+$ ls
+.              1 1 1024
+..             1 1 1024
+README         2 2 2441
+cat            2 3 36728
+...
+```
+
+**Added:** the PLIC (priorities, per-context enables and thresholds,
+claim/complete, driving `MEIP`/`SEIP`); a virtio-mmio **version 2** block device
+with the full descriptor/available/used ring protocol, acting as a bus master;
+host stdin as the UART's receive line, in raw non-blocking mode with the
+terminal restored on exit; the `--disk` option; and the CSRs xv6 needs that
+earlier phases had not implemented — `pmpcfg0`/`pmpaddr0` (stored, **not
+enforced**), `menvcfg`, and `stimecmp` for the Sstc supervisor timer.
+
+**Two bugs, both in earlier phases' code, neither caught by riscv-tests**
+
+- **A UART interrupt storm.** `interrupting()` reported
+  transmit-holding-register-empty as a standing level. Our transmitter finishes
+  instantly, so it was true forever — the moment xv6 enabled the TX interrupt
+  the line asserted and never dropped, and the kernel re-entered its console
+  handler every instruction. It printed one line and then made no progress past
+  three billion instructions. THRE is an *edge* on real hardware; it is a latch
+  here now, set on a THR write and cleared when the driver reads IIR.
+- **A fatal-trap check that ignored delegation.** Traps are reported rather than
+  dispatched while `mtvec` is zero, so an early fault does not vanish into an
+  invisible loop. But xv6 delegates every exception to S-mode and never writes
+  `mtvec` at all — so the check fired on `initcode`'s very first `ecall`, after
+  420 million instructions of correct execution. It now follows the same
+  delegation decision `enter_trap()` makes, and looks at `stvec` when the trap
+  is bound for supervisor mode.
+
+**A third, found by the new tests.** `Plic::complete()` cleared the in-service
+bit but did not re-raise a source whose line was still asserted, so a second
+interrupt arriving during a handler was silently lost. The PLIC now keeps the
+device's line and the gateway's pending bit as separate bitmaps, which is what
+real hardware does and what makes the re-raise natural.
+
+**Speed.** The CPU consults the PLIC once per instruction, and arbitration is a
+scan over every source. Caching the result behind a dirty flag took the emulator
+from 7M to **15.4M instructions per second** — 2.4×, and the difference between
+a boot measured in seconds and one measured in minutes.
+
+**Tests:** `tests/test_interrupt_devices.cpp`, 728 checks over both devices —
+arbitration by priority rather than IRQ number (verified in both directions),
+the full claim/complete cycle, context independence, sector-accurate reads and
+writes, interrupt delivery and acknowledgement, consecutive requests, and a
+request past the end of the disk being refused rather than reading out of
+bounds.
+
+**Known limitation:** PMP registers are stored but not enforced. Enough to boot;
+not enough to isolate.
+
+**Docs:** [`07-booting-xv6.md`](07-booting-xv6.md)

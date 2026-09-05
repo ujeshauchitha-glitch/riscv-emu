@@ -99,6 +99,7 @@ The format is detected from the file's magic number:
 | `--max-steps N` | stop after N instructions (default 100,000,000) |
 | `--dram-size-mb N` | guest RAM in MiB (default 128) |
 | `--timer-divisor N` | instructions per `mtime` tick (default 1) |
+| `--disk FILE` | back the virtio block device with FILE |
 | `--help` | the same list |
 
 Guest console output goes to **stdout**; the emulator's own diagnostics and the
@@ -276,13 +277,97 @@ or clear `mtvec` before the `ebreak`, as `examples/trap_selftest.S` does.
 
 ---
 
-## 7. Run absolutely everything
+## 7. Boot xv6
+
+xv6 is a small Unix-like teaching OS from MIT, and booting it is what this
+emulator was built for.
+
+### Build it
+
+xv6's stock build targets `-march=rv64gc`. The `c` there is the compressed
+16-bit instruction extension, which this emulator does not implement yet
+(phase 8), and `g` pulls in floating point as well. Build it for the extensions
+the emulator does have:
+
+```bash
+git clone https://github.com/mit-pdos/xv6-riscv
+cd xv6-riscv
+make CFLAGS_EXTRA='-march=rv64ima_zicsr_zifencei -mabi=lp64' \
+     kernel/kernel fs.img
+```
+
+You need the same `riscv64-unknown-elf` (or `riscv64-linux-gnu`) toolchain the
+self-tests use. To confirm the kernel really is free of compressed instructions
+before trying to boot it — every compressed instruction is a 16-bit halfword, so
+a `.c.`-prefixed mnemonic in the disassembly is the thing to look for:
+
+```bash
+riscv64-unknown-elf-objdump -d kernel/kernel | grep -c $'\tc\.'
+# 0
+```
+
+A non-zero count means the build picked up the stock `-march` somewhere; check
+that `CFLAGS_EXTRA` reached every compilation unit, and `make clean` first.
+
+### Boot it
+
+```bash
+./build/riscv_emu --disk path/to/xv6-riscv/fs.img \
+                  path/to/xv6-riscv/kernel/kernel
+```
+
+The kernel is an ELF64 image, so the loader places it by its program headers;
+`--disk` backs the virtio block device with the filesystem image. After a few
+seconds:
+
+```
+xv6 kernel is booting
+
+init: starting sh
+$
+```
+
+That prompt is live — type at it. `ls`, `cat README`, `echo hi`, `wc README`
+all work, and `usertests` runs the full xv6 test suite (slowly: it is tens of
+billions of instructions, so raise `--max-steps`).
+
+The default step budget of 100 million is far too small for a boot — xv6 reaches
+the shell at roughly 500 million instructions. Pass a real budget:
+
+```bash
+./build/riscv_emu --disk fs.img --max-steps 100000000000 kernel/kernel
+```
+
+### Drive it from a script
+
+Standard input is the console's receive line, so the shell can be piped to.
+Give it time to boot before the input matters:
+
+```bash
+(printf 'ls\n'; sleep 20) | ./build/riscv_emu --disk fs.img \
+    --max-steps 900000000 kernel/kernel
+```
+
+### If it stops instead of booting
+
+| Stop message | Likely cause |
+|---|---|
+| `illegal instruction` early, at a low address | the kernel was built with `c` or `f`/`d` after all |
+| `step budget exhausted` before the prompt | `--max-steps` too small; xv6 needs ~500M to reach the shell |
+| a fault right after `virtio_disk_init` | no `--disk`, or an unreadable image |
+
+`--trace` works here too, but a boot retires hundreds of millions of
+instructions — redirect it to a file and look at the tail, not the head.
+
+---
+
+## 8. Run absolutely everything
 
 ```bash
 ./run-all.sh
 ```
 
-Builds from scratch, runs all eleven suites, then runs the built-in demo and
+Builds from scratch, runs all thirteen suites, then runs the built-in demo and
 each self-test and reports what each produced. Useful after changing anything,
 and as a single command to check out a fresh clone with.
 
@@ -296,6 +381,6 @@ and as a single command to check out a fresh clone with.
 
 - [`../README.md`](../README.md) — what the project is and where it is going
 - [`PHASES.md`](PHASES.md) — the roadmap and what each phase delivered
-- The numbered design notes (`00-` … `04-`) explain *why* the emulator is built
+- The numbered design notes (`00-` … `07-`) explain *why* the emulator is built
   the way it is. Each records the state at the end of its phase; this page and
   the README always describe the present.

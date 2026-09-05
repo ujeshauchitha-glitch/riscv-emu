@@ -7,17 +7,38 @@ No dependencies: a C++20 compiler and CMake ≥ 3.16 are all you need.
 
 ## Status
 
-**Phases 0-6 done, three to go.** RV64IMA with all three privilege levels,
-M-mode and S-mode traps, Sv39 virtual memory, and devices. Every
-[`riscv-tests`](https://github.com/riscv-software-src/riscv-tests) case the
-emulator can build now passes:
+**It boots an OS.** xv6-riscv reaches a shell prompt, the prompt can be typed
+at, and `ls` and `cat` read real data off a virtio disk image:
+
+```
+xv6 kernel is booting
+
+init: starting sh
+$ ls
+.              1 1 1024
+..             1 1 1024
+README         2 2 2441
+cat            2 3 36728
+echo           2 4 35584
+...
+$ cat README
+xv6 is a re-implementation of Dennis Ritchie's and Ken Thompson's Unix
+Version 6 (v6).  ...
+```
+
+Every [`riscv-tests`](https://github.com/riscv-software-src/riscv-tests) case
+the emulator can build passes:
 
 ```
 rv64ui 54/54   rv64um 13/13   rv64ua 19/19   rv64mi 11/11   rv64si 4/4
 101/101 passed
 ```
 
-Next up: the PLIC and a virtio block device - and then xv6 boots.
+**Phases 0-7 done, two to go.** Next: the compressed and floating-point
+extensions, a device tree and SBI - and then Linux.
+
+[`docs/07-booting-xv6.md`](docs/07-booting-xv6.md) explains how the boot works
+and the two bugs that stood between "runs a kernel" and "boots xv6".
 
 ## What works today
 
@@ -32,9 +53,12 @@ Next up: the PLIC and a virtio block device - and then xv6 boots.
 | **A** — atomics, `LR`/`SC` | ✅ complete |
 | **Devices** — UART, CLINT, syscon | ✅ complete |
 | **ELF64 loader** | ✅ complete |
-| Devices — PLIC, virtio-blk | ⬜ phase 7 |
 | **S-mode + U-mode**, trap delegation | ✅ complete |
 | **Sv39 virtual memory**, TLB | ✅ complete |
+| **Devices** — PLIC, virtio-blk | ✅ complete |
+| **Interactive console** — host stdin as the UART's receive line | ✅ complete |
+| **Boots xv6-riscv to a shell** | ✅ |
+| PMP — registers stored, *not enforced* | ⚠️ partial |
 | C — compressed instructions | ⬜ phase 8 |
 | F/D — floating point | ⬜ phase 8 |
 
@@ -48,7 +72,7 @@ loudly at the exact instruction.
 ./run-all.sh
 ```
 
-Builds the project, runs all eleven test suites, then runs the demo and every
+Builds the project, runs all thirteen test suites, then runs the demo and every
 self-test and reports what each produced. Use `--quick` to skip the clean
 rebuild.
 
@@ -72,6 +96,9 @@ cmake --build build
 # The format is detected from the file's magic number.
 ./build/riscv_emu path/to/kernel.elf
 
+# Boot xv6 (build it first - see docs/RUNNING.md section 7)
+./build/riscv_emu --disk fs.img --max-steps 100000000000 kernel/kernel
+
 # The bare-metal self-tests (built when a RISC-V toolchain is installed).
 # Each stops on ebreak with one bit set in a0 per passing check.
 ./build/riscv_emu --dump build/rv64i_selftest.bin   # expect a0 = 0x3fff
@@ -90,9 +117,10 @@ read a trace or a stop message when something goes wrong.
 cd build && ctest --output-on-failure
 ```
 
-Twelve suites: unit tests for the decoder, the bus, the CPU, the RV64I
-instruction set, the CSR/trap machinery, the M/A extensions, the devices and
-supervisor mode with the MMU, plus four bare-metal self-tests
+Thirteen suites: unit tests for the decoder, the bus, the CPU, the RV64I
+instruction set, the CSR/trap machinery, the M/A extensions, the devices,
+supervisor mode with the MMU, and the PLIC and virtio block device, plus four
+bare-metal self-tests
 assembled with a real RISC-V toolchain. The self-tests are skipped automatically
 when no toolchain is present - to enable them:
 
@@ -145,9 +173,9 @@ guest kernels — which are linked expecting exactly this layout — can be boot
 |---|---|---|
 | `0x0010_0000` | syscon (poweroff / reboot) | ✅ |
 | `0x0200_0000` | CLINT (timer, software interrupts) | ✅ |
-| `0x0C00_0000` | PLIC (external interrupts) | phase 7 |
+| `0x0C00_0000` | PLIC (external interrupts) | ✅ |
 | `0x1000_0000` | UART0 (NS16550A console) | ✅ |
-| `0x1000_1000` | virtio-mmio (block device) | phase 7 |
+| `0x1000_1000` | virtio-mmio (block device) | ✅ |
 | `0x8000_0000` | DRAM | ✅ |
 
 Addresses claimed by no device raise an access fault rather than reading zero,
@@ -164,11 +192,11 @@ so a kernel that jumps into the weeds stops immediately with a clear cause.
 | 4 | ELF loader, UART, CLINT — first real output | ✅ |
 | 5 | riscv-tests + CI | ✅ |
 | 6 | S-mode + Sv39 MMU | ✅ |
-| 7 | PLIC + virtio-blk — **boot xv6** | ⬜ next |
-| 8 | Linux prerequisites (C, F/D, DTB, SBI) | ⬜ |
+| 7 | PLIC + virtio-blk — **boot xv6** | ✅ |
+| 8 | Linux prerequisites (C, F/D, DTB, SBI) | ⬜ next |
 | 9 | **Boot Linux** | ⬜ |
 
-Phase 7 is the milestone: xv6 booting to a shell. Linux is the stretch.
+Phase 7 was the milestone: xv6 boots to a shell. Linux is the stretch.
 
 [`docs/PHASES.md`](docs/PHASES.md) has the detail behind each phase.
 
@@ -197,6 +225,9 @@ Each phase also ships an explainer alongside its code:
 - [`06-privilege-and-paging.md`](docs/06-privilege-and-paging.md) - why sstatus
   is a view rather than a copy, how an Sv39 walk works, and why the
   sign-extension rule creates the user/kernel address split
+- [`07-booting-xv6.md`](docs/07-booting-xv6.md) - the claim/complete handshake
+  and why it is what keeps a handler from re-entering itself, how a virtqueue
+  works, and the two bugs that stood between "runs a kernel" and "boots xv6"
 
 ## Goals
 
