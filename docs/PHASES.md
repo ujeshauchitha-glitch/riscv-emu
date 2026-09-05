@@ -335,9 +335,9 @@ not enough to isolate.
 
 **Docs:** [`07-booting-xv6.md`](07-booting-xv6.md)
 
-## Phase 8: Linux prerequisites — in progress
+## Phase 8: Linux prerequisites — done
 
-### Part 1: the C (compressed) extension — done
+### Part 1: the C (compressed) extension
 
 **Stock, unmodified xv6 now boots.** Phase 7 could only run it after patching
 its Makefile off `-march=rv64gc`; the emulator now runs the 5,253 compressed
@@ -380,7 +380,7 @@ suite in the runner: **102/102 riscv-tests pass**.
 
 **Docs:** [`08-compressed-instructions.md`](08-compressed-instructions.md)
 
-### Part 2: F and D — done
+### Part 2: F and D
 
 Thirty-two more registers, shared between the two precisions - so a single is
 **NaN-boxed**, stored with its upper half all ones, which is the encoding of a
@@ -405,7 +405,7 @@ the host: out-of-range conversion saturates rather than being undefined;
 no hardware support on x86 or ARM. It maps to round-to-nearest-even, which
 differs only on an exact tie.
 
-### Part 3: the device tree — done
+### Part 3: the device tree
 
 Linux gets everything it knows about the machine from a blob left in memory.
 `src/fdt.cpp` generates it directly rather than shelling out to `dtc` - not for
@@ -417,7 +417,7 @@ Two properties are easy to omit and fail confusingly: without `stdout-path`
 Linux has a UART driver *and* a node describing the UART and still boots
 silently; `riscv,isa` must match what the emulator implements exactly.
 
-### Part 4: SBI — done
+### Part 4: SBI
 
 `mtimecmp` is a machine-mode register, so a supervisor cannot set its own timer.
 Implemented directly rather than by loading OpenSBI - real firmware would be
@@ -448,7 +448,7 @@ An unmodified Linux 6.6 kernel, stock `defconfig`, boots to a user process.
   Linux is running on the riscv-emu emulator.
 ```
 
-**Four problems stood between phase 8 and this, and three of them were not
+**Five problems stood between phase 8 and this, and three of them were not
 emulator bugs at all** - they were missing firmware. The emulator was behaving
 exactly as the spec says a bare hart should; what was absent was the layer that
 normally sits underneath a kernel and arranges things on its behalf.
@@ -470,10 +470,27 @@ normally sits underneath a kernel and arranges things on its behalf.
   32, so it is only reachable if the device honours `DeviceFeaturesSel` - which
   it did not. xv6 never checks, which is why phase 7 was unaffected, and why
   booting a second stricter OS was worth the trouble.
+- **The UART said *that* it had interrupted, not *why*.** `IIR` returned a bare
+  "an interrupt is pending", leaving the cause field at `000` - modem status
+  change. Linux's 8250 driver read the modem status register, found nothing, and
+  never touched the receive buffer: the console printed perfectly and could not
+  be typed at. xv6 never reads IIR at all, so this is the same shape as the
+  virtio finding - the first OS was not strict enough to notice.
 
 **Added:** `scripts/boot-linux.sh` (fetch, build, initramfs, boot in one
 command), `examples/initramfs/init.c`, and RISC-V `Image` header parsing so a
 flat kernel is placed at `DRAM_BASE + text_offset` rather than at the start of
 DRAM.
 
+With those, the console is interactive: `uptime`, `interrupts` and `poweroff`
+all work, and `/proc/interrupts` shows the machine reporting on itself - timer
+interrupts arriving through SBI, console interrupts through the PLIC, virtio
+registered.
+
 **Docs:** [`09-booting-linux.md`](09-booting-linux.md)
+
+---
+
+All nine phases are done. The emulator boots stock xv6 to an interactive shell
+and stock Linux 6.6 to an interactive prompt, and passes 125/125 riscv-tests
+across sixteen CTest suites.
