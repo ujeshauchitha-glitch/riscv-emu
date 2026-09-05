@@ -9,26 +9,65 @@ demo, printing what each one did.
 
 ## 1. Prerequisites
 
-**Required** — a C++20 compiler and CMake ≥ 3.16. Nothing else; the emulator has
-no third-party dependencies.
+Run this first — it tells you what your machine has, what it is missing, and the
+exact command to install the rest for your distribution:
 
 ```bash
-sudo apt-get install build-essential cmake     # Debian / Ubuntu
+./scripts/check-setup.sh
 ```
 
-**Optional but recommended** — a RISC-V cross-toolchain. Without it the project
-builds and the unit tests run, but the four bare-metal self-tests are skipped,
-and you cannot assemble your own guest programs.
+There are three tiers, and only the first is genuinely required.
 
-```bash
-sudo apt-get install gcc-riscv64-unknown-elf
-```
+### To build and run the emulator
 
-CMake reports which it found at configure time:
+A C++20 compiler and CMake ≥ 3.16. Nothing else — the emulator has no
+third-party dependencies.
+
+| | |
+|---|---|
+| Fedora / RHEL | `sudo dnf install gcc-c++ cmake make` |
+| Debian / Ubuntu | `sudo apt install build-essential cmake` |
+| Arch | `sudo pacman -S gcc cmake make` |
+
+### To run the test suites and boot xv6
+
+A RISC-V **bare-metal** toolchain. Without it the project still builds and the
+unit tests still run, but the four bare-metal self-tests are skipped, you cannot
+assemble your own guest programs, and `riscv-tests` and xv6 are unavailable.
+
+| | |
+|---|---|
+| Fedora / RHEL | `sudo dnf install gcc-riscv64-elf binutils-riscv64-elf` |
+| Debian / Ubuntu | `sudo apt install gcc-riscv64-unknown-elf` |
+| Arch | `sudo pacman -S riscv64-elf-gcc riscv64-elf-binutils` |
+
+Note the prefix differs: Fedora's is `riscv64-elf-`, Debian's is
+`riscv64-unknown-elf-`. Everything here accepts either, so you do not have to
+care which you have — but it is why a command copied from one distribution's
+documentation fails on another.
+
+CMake reports what it found at configure time:
 
 ```
 -- RISC-V toolchain not found; skipping the bare-metal self-test
 ```
+
+### To boot Linux
+
+A RISC-V **Linux-target** toolchain, which is a different thing: the bare-metal
+one targets newlib and has no Linux headers, so it can build the self-tests but
+not a kernel. Plus the kernel's own build dependencies.
+
+| | |
+|---|---|
+| Fedora / RHEL | `sudo dnf install gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu flex bison bc openssl-devel elfutils-libelf-devel cpio` |
+| Debian / Ubuntu | `sudo apt install gcc-riscv64-linux-gnu libc6-dev-riscv64-cross flex bison bc libssl-dev libelf-dev cpio` |
+| Arch | `sudo pacman -S riscv64-linux-gnu-gcc flex bison bc cpio openssl` |
+
+### Optional
+
+`dtc`, the device-tree compiler — used to validate the device tree the emulator
+generates. `sudo dnf install dtc` / `sudo apt install device-tree-compiler`.
 
 ---
 

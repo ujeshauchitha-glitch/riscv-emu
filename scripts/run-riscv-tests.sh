@@ -66,13 +66,20 @@ else
   BOLD=""; GREEN=""; RED=""; DIM=""; OFF=""
 fi
 
-for tool in riscv64-unknown-elf-gcc; do
-  command -v "$tool" > /dev/null || {
-    echo "error: $tool not found. Install with:"
-    echo "  sudo apt-get install gcc-riscv64-unknown-elf"
-    exit 2
-  }
+# The toolchain prefix differs by distribution: Debian and Ubuntu ship
+# riscv64-unknown-elf-, Fedora ships riscv64-elf-, and a Linux-target
+# cross-compiler builds these freestanding tests fine as well.
+CROSS=""
+for p in riscv64-unknown-elf- riscv64-elf- riscv64-linux-gnu-; do
+  command -v "${p}gcc" > /dev/null && { CROSS="$p"; break; }
 done
+if [ -z "$CROSS" ]; then
+  echo "error: no RISC-V toolchain found. Install one with:"
+  echo "  Debian/Ubuntu  sudo apt install gcc-riscv64-unknown-elf"
+  echo "  Fedora         sudo dnf install gcc-riscv64-elf binutils-riscv64-elf"
+  echo "  Arch           sudo pacman -S riscv64-elf-gcc riscv64-elf-binutils"
+  exit 2
+fi
 
 [ -x "$EMU" ] || { echo "error: $EMU not built. Run: cmake --build build"; exit 2; }
 
@@ -119,7 +126,7 @@ for suite in $SUITES; do
 
     TOTAL=$((TOTAL + 1)); s_total=$((s_total + 1))
 
-    if ! riscv64-unknown-elf-gcc -march="$(march_for_suite "$suite")" -mabi=lp64 \
+    if ! "${CROSS}gcc" -march="$(march_for_suite "$suite")" -mabi=lp64 \
          -nostdlib -nostartfiles \
          -I "$ENV_DIR" -I "$MACROS" \
          -T "$ENV_DIR/link.ld" -o "$elf" "$src" > "$BUILD_DIR/${name}.log" 2>&1; then

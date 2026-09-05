@@ -139,8 +139,14 @@ assembled with a real RISC-V toolchain. The self-tests are skipped automatically
 when no toolchain is present - to enable them:
 
 ```bash
-apt-get install gcc-riscv64-unknown-elf
+# Fedora
+sudo dnf install gcc-riscv64-elf binutils-riscv64-elf
+# Debian / Ubuntu
+sudo apt install gcc-riscv64-unknown-elf
 ```
+
+`./scripts/check-setup.sh` covers every dependency, including the separate
+Linux-target toolchain needed to boot Linux.
 
 Plus the official reference suite:
 
