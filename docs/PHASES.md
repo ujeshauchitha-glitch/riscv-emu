@@ -17,8 +17,8 @@ modes. Linux additionally needs the C and F/D extensions, a device tree, and SBI
 | 3 | M and A extensions | ✅ done |
 | 4 | ELF loader, UART, CLINT — first output | ✅ done |
 | 5 | riscv-tests + CI | ✅ done |
-| 6 | S-mode + Sv39 MMU | ⬜ next |
-| 7 | PLIC + virtio-blk — **boot xv6** | ⬜ |
+| 6 | S-mode + Sv39 MMU | ✅ done |
+| 7 | PLIC + virtio-blk — **boot xv6** | ⬜ next |
 | 8 | Linux prerequisites (C, F/D, DTB, SBI) | ⬜ |
 | 9 | **Boot Linux** | ⬜ |
 
@@ -234,3 +234,37 @@ PMP. Both of the latter are optional and not required by xv6 or Linux. They are
 listed explicitly in the runner rather than dropped.
 
 **Docs:** [`05-testing.md`](05-testing.md)
+
+## Phase 6: S-mode + Sv39 MMU — done
+
+Three privilege levels and virtual memory. **101/101 riscv-tests pass**,
+including `rv64mi/illegal` which phase 5 had to exclude, and the whole `rv64si`
+supervisor suite.
+
+**Added:** U/S/M privilege enforcement; the supervisor CSRs (`sstatus`, `stvec`,
+`sepc`, `scause`, `stval`, `sie`, `sip`, `sscratch`, `satp`); trap delegation via
+`medeleg`/`mideleg`; `SRET`; `SFENCE.VMA`; a full Sv39 walker with superpages,
+`A`/`D` updates and a TLB; `mstatus.MPRV`, `SUM`, `MXR`, `TVM`, `TSR`, `TW`.
+
+**Fine print handled**
+
+- `sstatus`/`sie`/`sip` are *views* onto `mstatus`/`mie`/`mip`, not copies. A
+  copy would drift, and a kernel clearing `sstatus.SIE` would keep taking
+  interrupts inside its critical section. The masking is also a boundary: a
+  supervisor writing all-ones must not reach `MIE` or `MPP`.
+- Traps taken in machine mode are never delegated — there is nothing more
+  privileged to delegate from.
+- `SUM` lets a supervisor read user pages but *never* execute them.
+- The sign-extension rule on bits 63:39 is what creates the unaddressable hole
+  between user and kernel space.
+- `W` without `R` is reserved, not write-only. A misaligned superpage faults.
+- `SFENCE.VMA` exists because nothing about writing a PTE tells the hardware to
+  drop its cached translation.
+
+**Two bugs found.** `mstatus.TVM`/`TSR` were checked by `SFENCE.VMA` and `SRET`
+but were not writable, so those checks were dead code that read correctly —
+`rv64mi/illegal` exposed it. And `rv64si/ma_fetch` failed on what looked like a
+wrong `sepc`; the emulator was right, and the fault was the test environment's
+trap entry clobbering `t0` before the handler could read it.
+
+**Docs:** [`06-privilege-and-paging.md`](06-privilege-and-paging.md)

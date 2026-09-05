@@ -252,7 +252,8 @@ const char* mnemonic(const DecodedInst& inst) {
                         case 0x102: return "sret";    // phase 6
                         case 0x105: return "wfi";
                         case 0x302: return "mret";
-                        default:    return "unimp";
+                        default:
+                            return (inst.funct7 == 0x09) ? "sfence.vma" : "unimp";
                     }
                 case 0x1: return "csrrw";
                 case 0x2: return "csrrs";

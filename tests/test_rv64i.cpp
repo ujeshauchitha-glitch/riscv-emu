@@ -465,8 +465,9 @@ void test_not_yet_implemented_traps_rather_than_misexecuting() {
     Machine n({i_type(opcodes::SYSTEM, 3, 0x1, 0, csr::MSTATUS)});  // csrrw
     CHECK(n.cpu->step());
 
-    // SRET belongs to supervisor mode and is still illegal until phase 6.
-    Machine o({i_type(opcodes::SYSTEM, 0, 0x0, 0, 0x102)});
+    // SRET arrived with supervisor mode in phase 6; its behaviour is covered in
+    // tests/test_supervisor.cpp. An unallocated SYSTEM immediate still traps.
+    Machine o({i_type(opcodes::SYSTEM, 0, 0x0, 0, 0x7ff)});
     const Status sr = o.cpu->step();
     CHECK(!sr);
     CHECK(sr.trap.cause == Exception::IllegalInstruction);

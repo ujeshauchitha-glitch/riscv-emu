@@ -23,15 +23,37 @@
 // The tests keep the current check number in gp throughout.
 #define TESTNUM gp
 
-// Privilege-mode selectors. Every test here runs in machine mode, which is the
-// only mode implemented so far, so these are no-ops. RVTEST_RV64S would need
-// supervisor mode (phase 6) and RVTEST_RV64UF floating point (phase 8); tests
-// using those are not built yet.
-#define RVTEST_RV64U
-#define RVTEST_RV64M
-#define RVTEST_RV64S
-#define RVTEST_RV32U
-#define RVTEST_RV32M
+// Privilege-mode selectors.
+//
+// Each defines an `init` macro that RVTEST_CODE_BEGIN invokes after setting up
+// the trap vectors. That indirection exists because the selector appears at the
+// top of a test file, before the entry point is emitted, so it cannot generate
+// code directly - it can only leave instructions for the entry code to run.
+//
+// The U and M suites run in machine mode: machine mode can do everything they
+// test, and staying there keeps the environment simple. The S suite genuinely
+// needs supervisor mode, so it drops into it.
+#define RVTEST_RV64U  .macro init; .endm
+#define RVTEST_RV64M  .macro init; .endm
+#define RVTEST_RV32U  .macro init; .endm
+#define RVTEST_RV32M  .macro init; .endm
+
+// Drop into supervisor mode via MRET, delegating every trap so the test's own
+// supervisor handler sees them rather than machine mode intercepting first.
+#define RVTEST_ENTER_SUPERVISOR                                                \
+        li      t0, MSTATUS_MPP;                                               \
+        csrc    mstatus, t0;                                                   \
+        li      t0, (MSTATUS_MPP & -MSTATUS_MPP) * PRV_S;                      \
+        csrs    mstatus, t0;                                                   \
+        li      t0, -1;                                                        \
+        csrw    medeleg, t0;                                                   \
+        csrw    mideleg, t0;                                                   \
+        la      t0, 94f;                                                       \
+        csrw    mepc, t0;                                                      \
+        mret;                                                                  \
+94:
+
+#define RVTEST_RV64S  .macro init; RVTEST_ENTER_SUPERVISOR; .endm
 
 // Report success: tohost = 1.
 #define RVTEST_PASS                                                            \
@@ -61,18 +83,28 @@
         .section .text.init;                                                   \
         .align  6;                                                             \
         .weak   mtvec_handler;                                                 \
+        .weak   stvec_handler;                                                 \
         .globl  _start;                                                        \
 _start:                                                                        \
-        la      t0, __default_trap;                                            \
-        csrw    mtvec, t0;                                                     \
+        /* Point mtvec/stvec directly at the test's own handler when it has    \
+           one, resolving the weak symbol HERE rather than in the trap entry.  \
+           A trap entry that loaded the handler address into a register would  \
+           clobber that register before the handler ran - and the tests do     \
+           inspect their registers after a trap, so that silently breaks them. \
+           Doing it at _start costs nothing: no test has started yet. */       \
+        la      t0, mtvec_handler;                                             \
+        bnez    t0, 91f;                                                       \
+        la      t0, __trap_is_failure;                                         \
+91:     csrw    mtvec, t0;                                                     \
+        la      t0, stvec_handler;                                             \
+        bnez    t0, 92f;                                                       \
+        la      t0, __trap_is_failure;                                         \
+92:     csrw    stvec, t0;                                                     \
         li      TESTNUM, 0;                                                    \
+        init;                                                                  \
         j       __test_start;                                                  \
                                                                                \
         .align  2;                                                             \
-__default_trap:                                                                \
-        la      t0, mtvec_handler;                                             \
-        beqz    t0, __trap_is_failure;                                         \
-        jr      t0;                                                            \
 __trap_is_failure:                                                             \
         /* TESTNUM == 0 would encode as 1, which means "passed" - use a         \
            distinctive number instead so an early trap is not read as a pass */\
