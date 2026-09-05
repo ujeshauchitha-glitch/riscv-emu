@@ -69,11 +69,10 @@ constexpr u32 PRIV_USER       = 0;
 constexpr u32 PRIV_SUPERVISOR = 1;
 constexpr u32 PRIV_MACHINE    = 3;
 
-// The mode an MRET returns to when it has nowhere less privileged to go. The
-// spec says to set mstatus.MPP to the least-privileged supported mode; with
-// only machine mode implemented, that is machine mode. Phase 6 changes this to
-// PRIV_USER once user mode exists.
-constexpr u32 PRIV_LEAST_SUPPORTED = PRIV_MACHINE;
+// After MRET or SRET, the "previous privilege" field is reset to the
+// least-privileged mode the machine supports. All three now exist, so that is
+// user mode. Leaving it at machine would let a later MRET escalate.
+constexpr u32 PRIV_LEAST_SUPPORTED = PRIV_USER;
 
 const char* privilege_name(u32 priv);
 

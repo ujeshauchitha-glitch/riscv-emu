@@ -7,17 +7,17 @@ No dependencies: a C++20 compiler and CMake ≥ 3.16 are all you need.
 
 ## Status
 
-**Phases 0-5 done, four to go.** The emulator implements RV64IMA with M-mode
-traps and devices, and passes the official
-[`riscv-tests`](https://github.com/riscv-software-src/riscv-tests) suite:
+**Phases 0-6 done, three to go.** RV64IMA with all three privilege levels,
+M-mode and S-mode traps, Sv39 virtual memory, and devices. Every
+[`riscv-tests`](https://github.com/riscv-software-src/riscv-tests) case the
+emulator can build now passes:
 
 ```
-rv64ui 54/54   rv64um 13/13   rv64ua 19/19   rv64mi 10/10
-96/96 passed, 3 excluded (unimplemented features)
+rv64ui 54/54   rv64um 13/13   rv64ua 19/19   rv64mi 11/11   rv64si 4/4
+101/101 passed
 ```
 
-Next up: supervisor mode and the Sv39 MMU - the largest single phase, and the
-last major piece before xv6 can boot.
+Next up: the PLIC and a virtio block device - and then xv6 boots.
 
 ## What works today
 
@@ -33,7 +33,8 @@ last major piece before xv6 can boot.
 | **Devices** — UART, CLINT, syscon | ✅ complete |
 | **ELF64 loader** | ✅ complete |
 | Devices — PLIC, virtio-blk | ⬜ phase 7 |
-| S-mode + Sv39 virtual memory | ⬜ phase 6 |
+| **S-mode + U-mode**, trap delegation | ✅ complete |
+| **Sv39 virtual memory**, TLB | ✅ complete |
 | C — compressed instructions | ⬜ phase 8 |
 | F/D — floating point | ⬜ phase 8 |
 
@@ -89,9 +90,9 @@ read a trace or a stop message when something goes wrong.
 cd build && ctest --output-on-failure
 ```
 
-Eleven suites: unit tests for the decoder, the bus, the CPU, the RV64I
-instruction set, the CSR/trap machinery, the M/A extensions and the devices,
-plus four bare-metal self-tests
+Twelve suites: unit tests for the decoder, the bus, the CPU, the RV64I
+instruction set, the CSR/trap machinery, the M/A extensions, the devices and
+supervisor mode with the MMU, plus four bare-metal self-tests
 assembled with a real RISC-V toolchain. The self-tests are skipped automatically
 when no toolchain is present - to enable them:
 
@@ -127,6 +128,7 @@ include/          src/
   clint.hpp         Timer and software interrupts            clint.cpp
   syscon.hpp        Poweroff / reboot                        syscon.cpp
   elf_loader.hpp    ELF64 image loading                      elf_loader.cpp
+  mmu.hpp           Sv39 translation and the TLB             mmu.cpp
                     Command line                             main.cpp
 
 examples/         Bare-metal assembly + linker script
@@ -161,8 +163,8 @@ so a kernel that jumps into the weeds stops immediately with a clear cause.
 | 3 | M and A extensions | ✅ |
 | 4 | ELF loader, UART, CLINT — first real output | ✅ |
 | 5 | riscv-tests + CI | ✅ |
-| 6 | S-mode + Sv39 MMU | ⬜ next |
-| 7 | PLIC + virtio-blk — **boot xv6** | ⬜ |
+| 6 | S-mode + Sv39 MMU | ✅ |
+| 7 | PLIC + virtio-blk — **boot xv6** | ⬜ next |
 | 8 | Linux prerequisites (C, F/D, DTB, SBI) | ⬜ |
 | 9 | **Boot Linux** | ⬜ |
 
@@ -192,6 +194,9 @@ Each phase ships an explainer alongside the code:
   pending bits belong to hardware rather than software
 - [`05-testing.md`](docs/05-testing.md) - how a riscv-test reports its result,
   the counter bug the suite found, and which tests are excluded and why
+- [`06-privilege-and-paging.md`](docs/06-privilege-and-paging.md) - why sstatus
+  is a view rather than a copy, how an Sv39 walk works, and why the
+  sign-extension rule creates the user/kernel address split
 
 ## Goals
 

@@ -7,6 +7,7 @@
 #include "clint.hpp"
 #include "csr.hpp"
 #include "decoder.hpp"
+#include "mmu.hpp"
 #include "syscon.hpp"
 #include "result.hpp"
 #include "types.hpp"
@@ -60,8 +61,17 @@ public:
     // actually retired.
     Status run(u64 max_steps, u64* steps_out = nullptr);
 
-    // Fetch the 32-bit instruction word at the current PC.
-    Result<u32> fetch() const;
+    // Fetch the 32-bit instruction word at the current PC. Not const: an
+    // instruction fetch can fill the TLB.
+    Result<u32> fetch();
+
+    // Virtual memory. Translation is a no-op in machine mode and while satp
+    // says Bare, so this costs nothing until a kernel turns paging on.
+    Mmu mmu;
+
+    // Translated memory access, used by loads, stores and the fetch path.
+    Result<u64> mem_load(u64 vaddr, unsigned size, AccessType type);
+    Status      mem_store(u64 vaddr, unsigned size, u64 value);
 
     // Execute an already-decoded instruction. `next_pc_` is pre-set to pc + 4
     // by step(); control-transfer instructions overwrite it.
@@ -151,6 +161,19 @@ private:
     Status execute_amo(const DecodedInst& inst);        // A: LR/SC and the AMOs
     Status execute_csr(const DecodedInst& inst);        // CSRRW/S/C and imm forms
     Status execute_mret(const DecodedInst& inst);
+    Status execute_sret(const DecodedInst& inst);
+    Status execute_sfence_vma(const DecodedInst& inst);
+
+    // The privilege a load or store runs at.
+    //
+    // Normally the current mode, but mstatus.MPRV makes machine-mode data
+    // accesses use MPP's privilege instead - which is how M-mode firmware
+    // reaches a supervisor's address space to copy arguments in and out. It
+    // deliberately does not affect instruction fetch.
+    u32 data_privilege() const;
+
+    // True if mstatus.TVM makes this CSR access illegal.
+    bool tvm_blocks(u32 addr) const;
 
     // Read/write a CSR with the architectural access checks applied:
     // unimplemented address, write to a read-only address, insufficient

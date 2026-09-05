@@ -25,7 +25,7 @@ EMU="build/riscv_emu"
 
 # Suites the emulator can run today. rv64si needs supervisor mode (phase 6) and
 # rv64uf/rv64ud need floating point (phase 8), so they are deliberately absent.
-DEFAULT_SUITES="rv64ui rv64um rv64ua rv64mi"
+DEFAULT_SUITES="rv64ui rv64um rv64ua rv64mi rv64si"
 SUITES="${*:-$DEFAULT_SUITES}"
 
 # Tests that need a feature the emulator does not implement yet. These are
@@ -35,7 +35,6 @@ SUITES="${*:-$DEFAULT_SUITES}"
 #
 # Format: suite/name:reason
 EXCLUDED="
-rv64mi/illegal:needs supervisor mode (phase 6) - it waits for a supervisor
 rv64mi/breakpoint:needs the debug trigger module (optional, not planned)
 rv64mi/pmpaddr:needs physical memory protection (optional, not planned)
 "

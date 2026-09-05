@@ -28,7 +28,7 @@ inline u64 sext32(u32 value) {
 
 }  // namespace
 
-Cpu::Cpu(Bus& bus) : bus_(bus) {
+Cpu::Cpu(Bus& bus) : mmu(bus), bus_(bus) {
     regs.fill(0);
     pc = DRAM_BASE;
 }
@@ -43,7 +43,27 @@ void Cpu::write_reg(u32 index, u64 value) {
     regs[index] = value;
 }
 
-Result<u32> Cpu::fetch() const {
+u32 Cpu::data_privilege() const {
+    if (priv == PRIV_MACHINE && (csrs.mstatus() & csr::MSTATUS_MPRV)) {
+        return csrs.mstatus_mpp();
+    }
+    return priv;
+}
+
+Result<u64> Cpu::mem_load(u64 vaddr, unsigned size, AccessType type) {
+    const u32 p = (type == AccessType::Instruction) ? priv : data_privilege();
+    Result<u64> pa = mmu.translate(vaddr, type, p, csrs);
+    if (!pa) return pa;
+    return bus_.load(pa.value, size, type);
+}
+
+Status Cpu::mem_store(u64 vaddr, unsigned size, u64 value) {
+    Result<u64> pa = mmu.translate(vaddr, AccessType::Store, data_privilege(), csrs);
+    if (!pa) return Status::bad(pa.trap);
+    return bus_.store(pa.value, size, value);
+}
+
+Result<u32> Cpu::fetch() {
     // Without the C (compressed) extension every instruction is 4 bytes and
     // must be 4-byte aligned. Phase 8 relaxes this to 2 bytes when C lands.
     //
@@ -53,7 +73,7 @@ Result<u32> Cpu::fetch() const {
         return Result<u32>::bad(Exception::InstructionAddressMisaligned, pc);
     }
 
-    Result<u64> word = bus_.load(pc, 4, AccessType::Instruction);
+    Result<u64> word = mem_load(pc, 4, AccessType::Instruction);
     if (!word) return Result<u32>::bad(word.trap);
 
     return Result<u32>::good(static_cast<u32>(word.value));
@@ -144,44 +164,70 @@ Status Cpu::handle_trap_or_stop(const Trap& trap) {
 // them there would be no way back.
 // ---------------------------------------------------------------------------
 void Cpu::enter_trap(u64 cause_code, u64 tval, u64 epc, bool is_interrupt) {
-    csrs.write(csr::MEPC, epc);
-    csrs.write(csr::MCAUSE, cause_code);
-    csrs.write(csr::MTVAL, tval);
+    // Which mode handles this?
+    //
+    // A trap taken in supervisor or user mode goes to supervisor mode when the
+    // matching medeleg/mideleg bit is set. That delegation is what makes an OS
+    // efficient: without it every page fault and every system call would have
+    // to bounce through machine-mode firmware before reaching the kernel that
+    // actually handles it.
+    //
+    // Traps taken *in* machine mode are never delegated - there is nothing more
+    // privileged to delegate from.
+    const u64 raw_cause = cause_code & ~(1ull << 63);
+    const bool deleg = is_interrupt ? csrs.delegated_interrupt(raw_cause)
+                                    : csrs.delegated_exception(raw_cause);
+    const bool to_supervisor = (priv <= PRIV_SUPERVISOR) && deleg;
 
     u64 status = csrs.mstatus();
 
-    // Save the current interrupt-enable into MPIE, then clear MIE. A handler
-    // therefore starts with interrupts off and cannot be interrupted by the
-    // same source before it has had a chance to quiet it.
-    const bool mie = (status & csr::MSTATUS_MIE) != 0;
-    status = mie ? (status | csr::MSTATUS_MPIE) : (status & ~csr::MSTATUS_MPIE);
-    status &= ~csr::MSTATUS_MIE;
+    if (to_supervisor) {
+        csrs.write(csr::SEPC, epc);
+        csrs.write(csr::SCAUSE, cause_code);
+        csrs.write(csr::STVAL, tval);
 
-    // Record the privilege we came from, so MRET knows where to return.
-    status = (status & ~csr::MSTATUS_MPP) |
-             (static_cast<u64>(priv) << csr::MSTATUS_MPP_SHIFT);
+        // Save SIE into SPIE, then clear SIE, and record where we came from.
+        // SPP is a single bit because supervisor traps can only come from
+        // supervisor or user mode.
+        const bool sie = (status & csr::MSTATUS_SIE) != 0;
+        status = sie ? (status | csr::MSTATUS_SPIE) : (status & ~csr::MSTATUS_SPIE);
+        status &= ~csr::MSTATUS_SIE;
+        status = (priv == PRIV_SUPERVISOR) ? (status | csr::MSTATUS_SPP)
+                                           : (status & ~csr::MSTATUS_SPP);
+        csrs.set_mstatus(status);
+        priv = PRIV_SUPERVISOR;
 
-    csrs.set_mstatus(status);
-    priv = PRIV_MACHINE;  // traps always land in machine mode until phase 6
+        const u64 tvec = csrs.read(csr::STVEC);
+        const u64 base = tvec & ~csr::MTVEC_MODE_MASK;
+        const u64 mode = tvec & csr::MTVEC_MODE_MASK;
+        pc = (mode == csr::MTVEC_MODE_VECTORED && is_interrupt)
+                 ? base + 4 * (cause_code & 0x3f)
+                 : base;
+    } else {
+        csrs.write(csr::MEPC, epc);
+        csrs.write(csr::MCAUSE, cause_code);
+        csrs.write(csr::MTVAL, tval);
+
+        const bool mie = (status & csr::MSTATUS_MIE) != 0;
+        status = mie ? (status | csr::MSTATUS_MPIE) : (status & ~csr::MSTATUS_MPIE);
+        status &= ~csr::MSTATUS_MIE;
+        status = (status & ~csr::MSTATUS_MPP) |
+                 (static_cast<u64>(priv) << csr::MSTATUS_MPP_SHIFT);
+        csrs.set_mstatus(status);
+        priv = PRIV_MACHINE;
+
+        const u64 tvec = csrs.read(csr::MTVEC);
+        const u64 base = tvec & ~csr::MTVEC_MODE_MASK;
+        const u64 mode = tvec & csr::MTVEC_MODE_MASK;
+        pc = (mode == csr::MTVEC_MODE_VECTORED && is_interrupt)
+                 ? base + 4 * (cause_code & 0x3f)
+                 : base;
+    }
 
     // A trap may be a context switch. If one thread does LR, is interrupted,
     // and another thread runs, the first thread's SC must fail when it
     // eventually resumes - otherwise both could believe they took the lock.
     clear_reservation();
-
-    const u64 tvec = csrs.read(csr::MTVEC);
-    const u64 base = tvec & ~csr::MTVEC_MODE_MASK;
-    const u64 mode = tvec & csr::MTVEC_MODE_MASK;
-
-    // Vectored mode spreads *interrupts* across a table of handlers, one entry
-    // per cause, four bytes apart. Exceptions always go to the base address
-    // even in vectored mode - a detail that is easy to miss and produces wild
-    // jumps when got wrong.
-    if (mode == csr::MTVEC_MODE_VECTORED && is_interrupt) {
-        pc = base + 4 * (cause_code & 0x3f);
-    } else {
-        pc = base;
-    }
 }
 
 void Cpu::take_trap(const Trap& trap) {
@@ -197,20 +243,34 @@ void Cpu::take_interrupt(Interrupt intr) {
 }
 
 bool Cpu::next_interrupt(Interrupt& out) const {
-    // Interrupts are globally gated by mstatus.MIE while in machine mode.
-    if (!csrs.mstatus_mie()) return false;
-
     const u64 ready = csrs.pending_enabled();
     if (ready == 0) return false;
 
-    // Priority order is fixed by the spec: external, then software, then timer,
-    // machine before supervisor. It is not the bit order.
-    if (ready & csr::MIP_MEIP) { out = Interrupt::MachineExternal; return true; }
-    if (ready & csr::MIP_MSIP) { out = Interrupt::MachineSoftware; return true; }
-    if (ready & csr::MIP_MTIP) { out = Interrupt::MachineTimer;    return true; }
-    if (ready & csr::MIP_SEIP) { out = Interrupt::SupervisorExternal; return true; }
-    if (ready & csr::MIP_SSIP) { out = Interrupt::SupervisorSoftware; return true; }
-    if (ready & csr::MIP_STIP) { out = Interrupt::SupervisorTimer;    return true; }
+    const u64 mideleg = csrs.read(csr::MIDELEG);
+
+    // An interrupt is enabled for a mode when we are *below* that mode - a less
+    // privileged context can always be interrupted by a more privileged one -
+    // or when we are in it and its global enable is set.
+    const bool m_enabled = (priv < PRIV_MACHINE) || csrs.mstatus_mie();
+    const bool s_enabled = (priv < PRIV_SUPERVISOR) || csrs.mstatus_sie();
+
+    // Machine-mode interrupts (those not delegated) outrank supervisor ones.
+    const u64 m_ready = ready & ~mideleg;
+    const u64 s_ready = ready & mideleg;
+
+    const u64 candidates = (m_enabled && m_ready) ? m_ready
+                         : (s_enabled && s_ready) ? s_ready
+                         : 0;
+    if (candidates == 0) return false;
+
+    // Priority is fixed by the spec and is not bit order: external, then
+    // software, then timer, machine before supervisor.
+    if (candidates & csr::MIP_MEIP) { out = Interrupt::MachineExternal;    return true; }
+    if (candidates & csr::MIP_MSIP) { out = Interrupt::MachineSoftware;    return true; }
+    if (candidates & csr::MIP_MTIP) { out = Interrupt::MachineTimer;       return true; }
+    if (candidates & csr::MIP_SEIP) { out = Interrupt::SupervisorExternal; return true; }
+    if (candidates & csr::MIP_SSIP) { out = Interrupt::SupervisorSoftware; return true; }
+    if (candidates & csr::MIP_STIP) { out = Interrupt::SupervisorTimer;    return true; }
     return false;
 }
 
@@ -383,7 +443,7 @@ Status Cpu::execute_load(const DecodedInst& inst) {
             return Status::bad(Exception::IllegalInstruction, inst.raw);
     }
 
-    Result<u64> r = bus_.load(addr, size, AccessType::Load);
+    Result<u64> r = mem_load(addr, size, AccessType::Load);
     if (!r) return Status::bad(r.trap);
 
     // The signed/unsigned distinction is the whole reason LW and LWU are
@@ -415,7 +475,7 @@ Status Cpu::execute_store(const DecodedInst& inst) {
 
     // Stores have no sign/unsigned variants: they write the low `size` bytes of
     // the register and the rest is simply discarded.
-    return bus_.store(addr, size, value);
+    return mem_store(addr, size, value);
 }
 
 // ---------------------------------------------------------------------------
@@ -672,6 +732,9 @@ Status Cpu::execute_system(const DecodedInst& inst) {
             }
             return Status::bad(Exception::Breakpoint, pc);
 
+        case 0x102:  // SRET
+            return execute_sret(inst);
+
         case 0x302:  // MRET
             return execute_mret(inst);
 
@@ -687,8 +750,9 @@ Status Cpu::execute_system(const DecodedInst& inst) {
             return Status::good();
 
         default:
-            // SRET (0x102) and SFENCE.VMA arrive with supervisor mode in
-            // phase 6.
+            // SFENCE.VMA shares funct3 == 0 but is an R-type: funct7 == 0x09,
+            // with rs1/rs2 naming an address and an ASID to narrow the flush.
+            if (inst.funct7 == 0x09) return execute_sfence_vma(inst);
             return Status::bad(Exception::IllegalInstruction, inst.raw);
     }
 }
@@ -729,10 +793,79 @@ Status Cpu::execute_mret(const DecodedInst& inst) {
     status = (status & ~csr::MSTATUS_MPP) |
              (static_cast<u64>(PRIV_LEAST_SUPPORTED) << csr::MSTATUS_MPP_SHIFT);
 
+    // Returning below machine mode clears MPRV. Leaving it set would let the
+    // supervisor we return into keep performing accesses at MPP's privilege,
+    // which would be an escalation.
+    if (return_priv != PRIV_MACHINE) status &= ~csr::MSTATUS_MPRV;
+
     csrs.set_mstatus(status);
     priv = return_priv;
 
     next_pc_ = csrs.read(csr::MEPC);
+    return Status::good();
+}
+
+// ---------------------------------------------------------------------------
+// SRET - return from a supervisor trap handler. The supervisor counterpart of
+// MRET, using SPP/SPIE instead of MPP/MPIE.
+// ---------------------------------------------------------------------------
+Status Cpu::execute_sret(const DecodedInst& inst) {
+    if (inst.rd != 0 || inst.rs1 != 0) {
+        return Status::bad(Exception::IllegalInstruction, inst.raw);
+    }
+    if (priv < PRIV_SUPERVISOR) {
+        return Status::bad(Exception::IllegalInstruction, inst.raw);
+    }
+    // mstatus.TSR ("trap SRET") lets machine-mode firmware intercept a
+    // supervisor's returns - used by hypervisors to virtualise them.
+    if (priv == PRIV_SUPERVISOR && (csrs.mstatus() & csr::MSTATUS_TSR)) {
+        return Status::bad(Exception::IllegalInstruction, inst.raw);
+    }
+
+    u64 status = csrs.mstatus();
+
+    const bool spie = (status & csr::MSTATUS_SPIE) != 0;
+    status = spie ? (status | csr::MSTATUS_SIE) : (status & ~csr::MSTATUS_SIE);
+    status |= csr::MSTATUS_SPIE;
+
+    // SPP is one bit: supervisor or user.
+    const u32 return_priv = (status & csr::MSTATUS_SPP) ? PRIV_SUPERVISOR : PRIV_USER;
+    status &= ~csr::MSTATUS_SPP;   // reset to user, the least-privileged mode
+
+    if (return_priv != PRIV_MACHINE) status &= ~csr::MSTATUS_MPRV;
+
+    csrs.set_mstatus(status);
+    priv = return_priv;
+
+    next_pc_ = csrs.read(csr::SEPC);
+    return Status::good();
+}
+
+// ---------------------------------------------------------------------------
+// SFENCE.VMA - tell the hardware that page tables changed.
+//
+// Needed because the TLB caches translations, and nothing about writing a page
+// table entry in memory tells the hardware to forget what it cached. A kernel
+// that unmaps a page and does not fence would find the old mapping still works.
+//
+// rs1 names a virtual address and rs2 an ASID, allowing a narrower flush; we
+// flush everything, which is always correct and is what a small TLB would do
+// anyway.
+// ---------------------------------------------------------------------------
+Status Cpu::execute_sfence_vma(const DecodedInst& inst) {
+    if (inst.rd != 0) {
+        return Status::bad(Exception::IllegalInstruction, inst.raw);
+    }
+    if (priv < PRIV_SUPERVISOR) {
+        return Status::bad(Exception::IllegalInstruction, inst.raw);
+    }
+    // mstatus.TVM ("trap virtual memory") intercepts a supervisor's page-table
+    // management, again for virtualisation.
+    if (priv == PRIV_SUPERVISOR && (csrs.mstatus() & csr::MSTATUS_TVM)) {
+        return Status::bad(Exception::IllegalInstruction, inst.raw);
+    }
+
+    mmu.flush();
     return Status::good();
 }
 
@@ -749,11 +882,21 @@ Status Cpu::execute_mret(const DecodedInst& inst) {
 // catching the trap is how software detects optional extensions.
 // ---------------------------------------------------------------------------
 
+// mstatus.TVM traps a supervisor's access to satp as well as SFENCE.VMA - both
+// are page-table management, and a hypervisor wants to intercept both.
+bool Cpu::tvm_blocks(u32 addr) const {
+    return addr == csr::SATP && priv == PRIV_SUPERVISOR &&
+           (csrs.mstatus() & csr::MSTATUS_TVM) != 0;
+}
+
 Result<u64> Cpu::csr_read(u32 addr) const {
     if (!csrs.exists(addr)) {
         return Result<u64>::bad(Exception::IllegalInstruction, 0);
     }
     if (priv < csr::min_privilege(addr)) {
+        return Result<u64>::bad(Exception::IllegalInstruction, 0);
+    }
+    if (tvm_blocks(addr)) {
         return Result<u64>::bad(Exception::IllegalInstruction, 0);
     }
     return Result<u64>::good(csrs.read(addr));
@@ -769,9 +912,17 @@ Status Cpu::csr_write(u32 addr, u64 value) {
     if (priv < csr::min_privilege(addr)) {
         return Status::bad(Exception::IllegalInstruction, 0);
     }
+    if (tvm_blocks(addr)) {
+        return Status::bad(Exception::IllegalInstruction, 0);
+    }
     if (addr == csr::MINSTRET || addr == csr::MCYCLE) counter_written_ = true;
 
     csrs.write(addr, value);
+
+    // Changing satp changes the entire address space, so every cached
+    // translation is now potentially wrong.
+    if (addr == csr::SATP) mmu.flush();
+
     return Status::good();
 }
 
@@ -1044,7 +1195,7 @@ Status Cpu::execute_amo(const DecodedInst& inst) {
 
     if (funct5 == 0x02) {  // LR
         if (inst.rs2 != 0) return Status::bad(Exception::IllegalInstruction, inst.raw);
-        Result<u64> r = bus_.load(addr, size, AccessType::Load);
+        Result<u64> r = mem_load(addr, size, AccessType::Load);
         if (!r) return Status::bad(r.trap);
 
         reservation_valid_ = true;
@@ -1061,7 +1212,7 @@ Status Cpu::execute_amo(const DecodedInst& inst) {
         reservation_valid_ = false;
 
         if (holds) {
-            Status st = bus_.store(addr, size, read_reg(inst.rs2));
+            Status st = mem_store(addr, size, read_reg(inst.rs2));
             if (!st) return st;
             write_reg(inst.rd, 0);   // 0 means the store happened
         } else {
@@ -1071,7 +1222,7 @@ Status Cpu::execute_amo(const DecodedInst& inst) {
     }
 
     // --- the read-modify-write AMOs ---
-    Result<u64> r = bus_.load(addr, size, AccessType::Load);
+    Result<u64> r = mem_load(addr, size, AccessType::Load);
     if (!r) return Status::bad(r.trap);
 
     const u64 orig = r.value;
@@ -1094,7 +1245,7 @@ Status Cpu::execute_amo(const DecodedInst& inst) {
             case 0x1c: result = (ua > ub) ? ua : ub; break;            // AMOMAXU
             default: return Status::bad(Exception::IllegalInstruction, inst.raw);
         }
-        Status st = bus_.store(addr, 4, result);
+        Status st = mem_store(addr, 4, result);
         if (!st) return st;
         write_reg(inst.rd, sext32(static_cast<u32>(orig)));
     } else {
@@ -1111,7 +1262,7 @@ Status Cpu::execute_amo(const DecodedInst& inst) {
             case 0x1c: result = (orig > src) ? orig : src; break;
             default: return Status::bad(Exception::IllegalInstruction, inst.raw);
         }
-        Status st = bus_.store(addr, 8, result);
+        Status st = mem_store(addr, 8, result);
         if (!st) return st;
         write_reg(inst.rd, orig);
     }

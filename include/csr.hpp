@@ -50,6 +50,29 @@ constexpr u32 MCAUSE    = 0x342;
 constexpr u32 MTVAL     = 0x343;
 constexpr u32 MIP       = 0x344;
 
+// --- supervisor trap setup ---
+//
+// sstatus, sie and sip are NOT separate registers. They are restricted *views*
+// onto mstatus, mie and mip: the same physical bits, with the machine-only ones
+// hidden. Modelling them as separate storage is a classic emulator bug - a
+// kernel clears sstatus.SIE to disable interrupts, and if that does not
+// actually clear mstatus.SIE, interrupts keep arriving inside what the kernel
+// believes is a critical section.
+constexpr u32 SSTATUS   = 0x100;
+constexpr u32 SIE       = 0x104;
+constexpr u32 STVEC     = 0x105;
+constexpr u32 SCOUNTEREN = 0x106;
+
+// --- supervisor trap handling ---
+constexpr u32 SSCRATCH  = 0x140;
+constexpr u32 SEPC      = 0x141;
+constexpr u32 SCAUSE    = 0x142;
+constexpr u32 STVAL     = 0x143;
+constexpr u32 SIP       = 0x144;
+
+// --- supervisor address translation ---
+constexpr u32 SATP      = 0x180;
+
 // --- counters ---
 // The unprivileged shadows (CYCLE, TIME, INSTRET) read the same underlying
 // state as their machine-mode counterparts.
@@ -67,6 +90,34 @@ constexpr u64 MSTATUS_MPIE = 1ull << 7;   // previous MIE
 constexpr u64 MSTATUS_SPP  = 1ull << 8;   // previous privilege (supervisor)
 constexpr u64 MSTATUS_MPP  = 3ull << 11;  // previous privilege (machine), 2 bits
 constexpr int MSTATUS_MPP_SHIFT = 11;
+constexpr u64 MSTATUS_MPRV = 1ull << 17;  // load/store as MPP's privilege
+constexpr u64 MSTATUS_SUM  = 1ull << 18;  // supervisor may access user pages
+constexpr u64 MSTATUS_MXR  = 1ull << 19;  // make executable pages readable
+
+// Virtualisation trap controls. Each makes an operation that supervisor mode
+// would normally perform freely trap to machine mode instead, so firmware or a
+// hypervisor can intercept it.
+constexpr u64 MSTATUS_TVM  = 1ull << 20;  // trap satp access and SFENCE.VMA
+constexpr u64 MSTATUS_TW   = 1ull << 21;  // trap WFI after a timeout
+constexpr u64 MSTATUS_TSR  = 1ull << 22;  // trap SRET
+
+// The bits sstatus exposes. Everything else in mstatus is machine-only and
+// reads as zero through the supervisor view.
+constexpr u64 SSTATUS_MASK = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP |
+                             MSTATUS_SUM | MSTATUS_MXR;
+
+// The interrupt bits sie/sip expose.
+constexpr u64 SIE_SIP_MASK = (1ull << 1) | (1ull << 5) | (1ull << 9);
+
+// --- satp ---
+constexpr int SATP_MODE_SHIFT = 60;
+constexpr u64 SATP_MODE_MASK  = 0xfull << SATP_MODE_SHIFT;
+constexpr u64 SATP_ASID_MASK  = 0xffffull << 44;
+constexpr u64 SATP_PPN_MASK   = (1ull << 44) - 1;
+
+constexpr u64 SATP_MODE_BARE = 0;
+constexpr u64 SATP_MODE_SV39 = 8;
+constexpr u64 SATP_MODE_SV48 = 9;
 
 // --- mie / mip interrupt bits ---
 // The bit position equals the interrupt's cause number, which is why
@@ -132,6 +183,22 @@ public:
     void set_mstatus(u64 v) { write(csr::MSTATUS, v); }
 
     bool mstatus_mie() const { return (mstatus() & csr::MSTATUS_MIE) != 0; }
+    bool mstatus_sie() const { return (mstatus() & csr::MSTATUS_SIE) != 0; }
+    bool mstatus_sum() const { return (mstatus() & csr::MSTATUS_SUM) != 0; }
+    bool mstatus_mxr() const { return (mstatus() & csr::MSTATUS_MXR) != 0; }
+
+    u64 satp() const { return read(csr::SATP); }
+    u64 satp_mode() const { return (satp() & csr::SATP_MODE_MASK) >> csr::SATP_MODE_SHIFT; }
+    u64 satp_ppn() const  { return satp() & csr::SATP_PPN_MASK; }
+    u64 satp_asid() const { return (satp() & csr::SATP_ASID_MASK) >> 44; }
+
+    // True if the trap with this cause is delegated to supervisor mode.
+    bool delegated_exception(u64 cause) const {
+        return cause < 64 && ((read(csr::MEDELEG) >> cause) & 1) != 0;
+    }
+    bool delegated_interrupt(u64 cause) const {
+        return cause < 64 && ((read(csr::MIDELEG) >> cause) & 1) != 0;
+    }
     u32  mstatus_mpp() const {
         return static_cast<u32>((mstatus() & csr::MSTATUS_MPP) >> csr::MSTATUS_MPP_SHIFT);
     }

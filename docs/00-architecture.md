@@ -174,11 +174,13 @@ Result<u64> load(...);   // either a value, or a Trap
 Status      store(...);  // either OK, or a Trap
 ```
 
-This is the shape of Rust's `Result<T, E>`, which is what most RISC-V emulators
-use. It keeps the trap path visible in the type signature — you cannot forget to
+This is the errors-as-values pattern — the same shape as `std::expected`, or as
+Rust's `Result<T, E>` if that is a more familiar reference. (The project is
+C++20 throughout; `std::expected` is C++23, so `include/result.hpp` is a small
+hand-rolled stand-in for it.)
+
+It keeps the trap path visible in the type signature — you cannot forget to
 handle it — and avoids stack unwinding on a path that executes constantly.
-(`std::expected` would be the natural fit but it is C++23; `include/result.hpp`
-is a small stand-in.)
 
 The `AccessType` enum (`include/device.hpp`) is a related detail worth noticing:
 the *same* failure produces a different trap cause depending on why memory was
