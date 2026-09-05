@@ -11,9 +11,11 @@
 #include "cpu.hpp"
 #include "dram.hpp"
 #include "elf_loader.hpp"
+#include "plic.hpp"
 #include "syscon.hpp"
 #include "types.hpp"
 #include "uart.hpp"
+#include "virtio.hpp"
 
 namespace {
 
@@ -32,6 +34,7 @@ void print_usage(const char* argv0) {
         << "  --dram-size-mb N     guest RAM size in MiB (default 128)\n"
         << "  --timer-divisor N    instructions per mtime tick (default 1)\n"
         << "  --dump               dump registers when execution stops\n"
+        << "  --disk FILE          back the virtio block device with FILE\n"
         << "  -h, --help           show this message\n";
 }
 
@@ -86,6 +89,7 @@ const char* kDemoMessage = "hello, RISC-V\n";
 
 int main(int argc, char** argv) {
     std::string image_path;
+    std::string disk_path;
     bool        trace         = false;
     bool        dump          = false;
     u64         max_steps     = 100'000'000;
@@ -106,6 +110,10 @@ int main(int argc, char** argv) {
         if (arg == "-h" || arg == "--help") { print_usage(argv[0]); return 0; }
         else if (arg == "--trace") trace = true;
         else if (arg == "--dump")  dump = true;
+        else if (arg == "--disk") {
+            if (i + 1 >= argc) { std::cerr << "error: --disk requires a path\n"; return 2; }
+            disk_path = argv[++i];
+        }
         else if (arg == "--max-steps")     { if (!next_value(max_steps)) return 2; }
         else if (arg == "--dram-size-mb")  { if (!next_value(dram_size_mb)) return 2; }
         else if (arg == "--timer-divisor") { if (!next_value(timer_divisor)) return 2; }
@@ -131,13 +139,35 @@ int main(int argc, char** argv) {
     Clint* clint = clint_owned.get();
     auto  syscon_owned = std::make_unique<Syscon>();
     Syscon* syscon = syscon_owned.get();
+    auto  plic_owned = std::make_unique<Plic>();
+    Plic* plic = plic_owned.get();
+    auto  virtio_owned = std::make_unique<VirtioBlk>();
+    VirtioBlk* virtio = virtio_owned.get();
+
+    // Keep a borrowed pointer to the UART before the bus takes ownership: the
+    // CPU samples its interrupt line every step.
+    Uart* uart = uart_owned.get();
 
     if (!bus.attach(std::move(dram_owned)) || !bus.attach(std::move(uart_owned)) ||
-        !bus.attach(std::move(clint_owned)) || !bus.attach(std::move(syscon_owned))) {
+        !bus.attach(std::move(clint_owned)) || !bus.attach(std::move(syscon_owned)) ||
+        !bus.attach(std::move(plic_owned)) || !bus.attach(std::move(virtio_owned))) {
         std::cerr << "error: failed to build the machine's address map\n";
         return 1;
     }
     clint->ticks_per_instruction = 1;
+
+    // The block device is a bus master - it reads and writes guest memory
+    // itself - and raises its interrupt through the PLIC.
+    virtio->attach(&bus, plic, VIRTIO0_IRQ);
+
+    if (!disk_path.empty()) {
+        if (!virtio->load_image(disk_path)) {
+            std::cerr << "error: cannot read disk image '" << disk_path << "'\n";
+            return 1;
+        }
+        std::cerr << "disk: " << disk_path << " (" << virtio->sectors()
+                  << " sectors)\n";
+    }
 
     // --- load the image ---
     u64 entry = DRAM_BASE;
@@ -179,6 +209,13 @@ int main(int argc, char** argv) {
     cpu.clint  = clint;
     cpu.syscon = syscon;
     cpu.htif_tohost_addr = tohost;
+    cpu.plic     = plic;
+    cpu.uart     = uart;
+    cpu.uart_irq = UART0_IRQ;
+
+    // The console becomes bidirectional here. Everything before this point
+    // could print; from now on a guest shell can also be typed at.
+    uart->attach_host_stdin();
     clint->ticks_per_instruction = timer_divisor;
 
     u64    retired = 0;

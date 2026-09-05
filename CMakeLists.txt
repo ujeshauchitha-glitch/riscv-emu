@@ -34,10 +34,12 @@ add_library(riscv_core STATIC
   src/csr.cpp
   src/elf_loader.cpp
   src/mmu.cpp
+  src/plic.cpp
   src/decoder.cpp
   src/dram.cpp
   src/syscon.cpp
   src/uart.cpp
+  src/virtio.cpp
   src/trap.cpp
 )
 target_include_directories(riscv_core PUBLIC include)
@@ -59,6 +61,7 @@ set(RISCV_EMU_TESTS
   test_muldiv_atomic
   test_devices
   test_supervisor
+  test_interrupt_devices
 )
 
 foreach(test_name IN LISTS RISCV_EMU_TESTS)

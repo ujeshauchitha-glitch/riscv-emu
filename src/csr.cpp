@@ -86,10 +86,22 @@ bool CsrFile::exists(u32 addr) const {
         case csr::STVAL:
         case csr::SIP:
         case csr::SATP:
+        case csr::STIMECMP:
+        case csr::MENVCFG:
+        case csr::PMPCFG0:
+        case csr::PMPCFG2:
             return true;
+
+        // Physical memory protection.
+        //
+        // These are stored but NOT enforced. A permissive configuration - which
+        // is all a kernel like xv6 writes, granting supervisor mode access to
+        // all of physical memory - behaves identically whether enforced or not.
+        // A *restrictive* configuration would be silently ignored, so this is a
+        // real limitation rather than a complete implementation, and it is
+        // recorded as such rather than left to be discovered.
         default:
-            // Everything else is unimplemented, and reading or writing it is an
-            // illegal instruction. That is how software probes for features.
+            if (addr >= csr::PMPADDR0 && addr <= csr::PMPADDR15) return true;
             return false;
     }
 }
