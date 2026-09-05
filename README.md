@@ -174,7 +174,9 @@ Phase 7 is the milestone: xv6 booting to a shell. Linux is the stretch.
 
 ## Design notes
 
-Each phase ships an explainer alongside the code:
+[`RUNNING.md`](docs/RUNNING.md) covers how to build, run, test and debug.
+
+Each phase also ships an explainer alongside its code:
 
 - [`00-architecture.md`](docs/00-architecture.md) — why memory became a bus, why
   traps are return values rather than exceptions, why the B and J immediate
@@ -187,8 +189,6 @@ Each phase ships an explainer alongside the code:
   instruction but past an interrupted one
 - [`03-m-and-a.md`](docs/03-m-and-a.md) - why RISC-V division never traps, and
   why a trap has to break an LR/SC reservation
-[`RUNNING.md`](docs/RUNNING.md) covers how to build, run, test and debug.
-
 - [`04-devices-and-mmio.md`](docs/04-devices-and-mmio.md) - memory-mapped I/O,
   why the timer clock counts instructions rather than seconds, and why interrupt
   pending bits belong to hardware rather than software
