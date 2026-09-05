@@ -99,6 +99,17 @@ public:
     // Set when a syscon poweroff or reboot stops the run.
     bool halted = false;
 
+    // HTIF: the address of a `tohost` word to watch, or 0 to watch nothing.
+    //
+    // The riscv-tests suite reports its result by writing here and spinning,
+    // rather than by powering the machine off - so the emulator has to poll it.
+    // Polling costs a bus lookup per instruction, which is why it is off unless
+    // an image actually declares the symbol.
+    u64 htif_tohost_addr = 0;
+
+    // The value the guest wrote to tohost, once it wrote a non-zero one.
+    u64 htif_tohost_value = 0;
+
     void dump_registers(std::ostream& os) const;
 
     // Tracing is opt-in and off by default. The previous version printed seven
@@ -146,6 +157,11 @@ private:
     // privilege. Each of those is an illegal-instruction trap.
     Result<u64> csr_read(u32 addr) const;
     Status      csr_write(u32 addr, u64 value);
+
+    // Set when the instruction being executed wrote minstret or mcycle. The
+    // spec says such a write suppresses that instruction's own increment, so
+    // reading the counter back immediately yields exactly what was written.
+    bool counter_written_ = false;
 
     // Shared trap-entry sequence for both exceptions and interrupts. They
     // differ only in the cause code, the resume address, and whether vectored

@@ -141,6 +141,7 @@ int main(int argc, char** argv) {
 
     // --- load the image ---
     u64 entry = DRAM_BASE;
+    u64 tohost = 0;
     if (image_path.empty()) {
         std::vector<u8> bytes;
         for (u32 w : demo_program()) {
@@ -164,6 +165,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
             entry = img.entry;
+            tohost = img.tohost;
         } else if (!dram->load_image(DRAM_BASE, bytes)) {
             std::cerr << "error: image (" << bytes.size() << " bytes) does not fit in "
                       << dram_size_mb << " MiB of DRAM\n";
@@ -176,12 +178,23 @@ int main(int argc, char** argv) {
     cpu.pc     = entry;
     cpu.clint  = clint;
     cpu.syscon = syscon;
+    cpu.htif_tohost_addr = tohost;
     clint->ticks_per_instruction = timer_divisor;
 
     u64    retired = 0;
     Status st      = cpu.run(max_steps, &retired);
 
-    if (cpu.halted) {
+    if (cpu.htif_tohost_value != 0) {
+        // The HTIF result convention used by riscv-tests: bit 0 marks the word
+        // as valid, and the rest is the failing check's number (0 = all passed).
+        const u64 code = cpu.htif_tohost_value >> 1;
+        if (code == 0) {
+            std::cerr << "\nPASS after " << retired << " instruction(s)\n";
+        } else {
+            std::cerr << "\nFAIL: test " << code << " failed, after " << retired
+                      << " instruction(s)\n";
+        }
+    } else if (cpu.halted) {
         std::cerr << "\nmachine powered off after " << retired << " instruction(s)";
         if (syscon->exit_code() != 0) std::cerr << " (exit code " << syscon->exit_code() << ")";
         std::cerr << "\n";
@@ -197,6 +210,9 @@ int main(int argc, char** argv) {
 
     if (dump) cpu.dump_registers(std::cout);
 
+    if (cpu.htif_tohost_value != 0) {
+        return (cpu.htif_tohost_value >> 1) == 0 ? 0 : 1;
+    }
     if (cpu.halted) return static_cast<int>(syscon->exit_code());
     return st ? 0 : 1;
 }

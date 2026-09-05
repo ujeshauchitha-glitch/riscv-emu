@@ -1,5 +1,10 @@
 build/
+build-*/
 *.o
 *.out
 .vscode/
 .idea/
+
+# riscv-tests is fetched on demand by scripts/run-riscv-tests.sh rather than
+# vendored: it is large, and it belongs to the RISC-V project.
+third_party/

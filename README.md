@@ -7,19 +7,17 @@ No dependencies: a C++20 compiler and CMake ≥ 3.16 are all you need.
 
 ## Status
 
-**Phases 0-4 done, five to go.** The emulator implements RV64IMA with M-mode
-traps, and now has devices: a guest prints to the console, takes timer
-interrupts, and powers the machine off itself.
+**Phases 0-5 done, four to go.** The emulator implements RV64IMA with M-mode
+traps and devices, and passes the official
+[`riscv-tests`](https://github.com/riscv-software-src/riscv-tests) suite:
 
 ```
-$ ./build/riscv_emu
-hello, RISC-V
-
-machine powered off after 79 instruction(s)
+rv64ui 54/54   rv64um 13/13   rv64ua 19/19   rv64mi 10/10
+96/96 passed, 3 excluded (unimplemented features)
 ```
 
-Next up: the official `riscv-tests` suite and CI, which is what makes the MMU
-work in phase 6 tractable.
+Next up: supervisor mode and the Sv39 MMU - the largest single phase, and the
+last major piece before xv6 can boot.
 
 ## What works today
 
@@ -101,11 +99,16 @@ when no toolchain is present - to enable them:
 apt-get install gcc-riscv64-unknown-elf
 ```
 
-The unit tests build their programs with encoders written separately from the
-emulator's own decoder, and the self-test goes further by validating against an
-independent assembler. From phase 5 the official
-[`riscv-tests`](https://github.com/riscv-software-src/riscv-tests) suite takes
-over as the primary correctness signal, running in CI.
+Plus the official reference suite:
+
+```bash
+./scripts/run-riscv-tests.sh
+```
+
+That one matters most. The tests in this repository were written alongside the
+emulator, so they cannot catch a misreading of the specification - both halves
+would share it. `riscv-tests` is written by the people who wrote the spec. It is
+fetched into `third_party/` on first run and needs a RISC-V toolchain.
 
 ## Layout
 
@@ -157,8 +160,8 @@ so a kernel that jumps into the weeds stops immediately with a clear cause.
 | 2 | Zicsr + M-mode traps | ✅ |
 | 3 | M and A extensions | ✅ |
 | 4 | ELF loader, UART, CLINT — first real output | ✅ |
-| 5 | riscv-tests + CI | ⬜ next |
-| 6 | S-mode + Sv39 MMU | ⬜ |
+| 5 | riscv-tests + CI | ✅ |
+| 6 | S-mode + Sv39 MMU | ⬜ next |
 | 7 | PLIC + virtio-blk — **boot xv6** | ⬜ |
 | 8 | Linux prerequisites (C, F/D, DTB, SBI) | ⬜ |
 | 9 | **Boot Linux** | ⬜ |
@@ -187,6 +190,8 @@ Each phase ships an explainer alongside the code:
 - [`04-devices-and-mmio.md`](docs/04-devices-and-mmio.md) - memory-mapped I/O,
   why the timer clock counts instructions rather than seconds, and why interrupt
   pending bits belong to hardware rather than software
+- [`05-testing.md`](docs/05-testing.md) - how a riscv-test reports its result,
+  the counter bug the suite found, and which tests are excluded and why
 
 ## Goals
 

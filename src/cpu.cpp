@@ -92,6 +92,7 @@ Status Cpu::step() {
     // Default: fall through to the next instruction. Jumps and branches
     // overwrite this inside execute().
     next_pc_ = pc + 4;
+    counter_written_ = false;
 
     if (trace) trace_inst(inst);
 
@@ -100,11 +101,14 @@ Status Cpu::step() {
 
     pc = next_pc_;
     ++instret;
-    csrs.write(csr::MINSTRET, instret);
+
     // One instruction per cycle. A real machine's cycle count differs from its
     // retired-instruction count, but nothing we can boot depends on that, and
     // guest code does use mcycle for crude delay loops.
-    csrs.write(csr::MCYCLE, instret);
+    //
+    // An instruction that wrote a counter does not also increment it: the spec
+    // requires the value read back afterwards to be exactly what was written.
+    if (!counter_written_) csrs.tick_counters();
     return Status::good();
 }
 
@@ -223,6 +227,18 @@ Status Cpu::run(u64 max_steps, u64* steps_out) {
             halted = true;
             if (steps_out) *steps_out = n + 1;
             return Status::good();
+        }
+
+        // The riscv-tests suite stops by writing its result to `tohost` and
+        // then spinning, so there is nothing to notice except the write itself.
+        if (htif_tohost_addr != 0) {
+            Result<u64> r = bus_.load(htif_tohost_addr, 8, AccessType::Load);
+            if (r && r.value != 0) {
+                htif_tohost_value = r.value;
+                halted = true;
+                if (steps_out) *steps_out = n + 1;
+                return Status::good();
+            }
         }
     }
     if (steps_out) *steps_out = n;
@@ -753,6 +769,8 @@ Status Cpu::csr_write(u32 addr, u64 value) {
     if (priv < csr::min_privilege(addr)) {
         return Status::bad(Exception::IllegalInstruction, 0);
     }
+    if (addr == csr::MINSTRET || addr == csr::MCYCLE) counter_written_ = true;
+
     csrs.write(addr, value);
     return Status::good();
 }

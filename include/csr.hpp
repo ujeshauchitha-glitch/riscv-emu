@@ -144,6 +144,14 @@ public:
     void raise_interrupt(u64 mip_bit)  { raw_[csr::MIP] |= mip_bit; }
     void clear_interrupt(u64 mip_bit)  { raw_[csr::MIP] &= ~mip_bit; }
 
+    // Advance the retired-instruction and cycle counters by one.
+    //
+    // These have to *increment*, not be assigned from the emulator's own step
+    // count: minstret is writable, and software that writes it expects counting
+    // to continue from the value it wrote. Assigning would silently discard the
+    // write on the very next instruction.
+    void tick_counters() { ++raw_[csr::MINSTRET]; ++raw_[csr::MCYCLE]; }
+
 private:
     std::array<u64, 4096> raw_{};
 
