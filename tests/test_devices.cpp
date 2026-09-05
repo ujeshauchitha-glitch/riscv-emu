@@ -55,6 +55,68 @@ void test_uart_reads_queued_input() {
     CHECK_EQ_U(empty.value, 0);   // nothing left
 }
 
+void test_uart_iir_names_the_interrupt_cause() {
+    // Bit 0 clear means an interrupt is pending, but that is not the whole
+    // answer: bits 3:1 say *which* condition caused it, and a real driver
+    // dispatches on that field rather than going looking.
+    //
+    //   0b001  transmitter holding register empty
+    //   0b010  received data available
+    //
+    // Returning a bare "something happened" leaves the field at 000, which
+    // means "modem status change" - so Linux's 8250 driver read the modem
+    // status register, found nothing, and never touched the receive buffer.
+    // The console printed perfectly and could not be typed at. xv6 never reads
+    // IIR at all, which is why that went unnoticed for a whole phase.
+    std::ostringstream out;
+    Uart uart(out);
+
+    // Nothing enabled, nothing waiting: bit 0 set means no interrupt.
+    auto iir = uart.load(2, 1);
+    CHECK(iir);
+    CHECK((iir.value & 1) != 0);
+
+    // A queued byte with receive interrupts enabled reports "data available".
+    uart.store(1, 1, 0x01);          // IER: receive
+    uart.feed_input("x");
+    iir = uart.load(2, 1);
+    CHECK(iir);
+    CHECK((iir.value & 1) == 0);                 // pending
+    CHECK_EQ_U((iir.value >> 1) & 0x7, 0x2);     // received data available
+
+    // Reading IIR must not consume the byte - only reading RBR does that.
+    auto rbr = uart.load(0, 1);
+    CHECK(rbr);
+    CHECK_EQ_U(rbr.value, 'x');
+
+    // With the queue drained and transmit interrupts enabled, a sent byte
+    // reports "transmitter empty" instead.
+    uart.store(1, 1, 0x02);          // IER: transmit
+    uart.store(0, 1, 'h');           // THR
+    iir = uart.load(2, 1);
+    CHECK(iir);
+    CHECK((iir.value & 1) == 0);
+    CHECK_EQ_U((iir.value >> 1) & 0x7, 0x1);     // THR empty
+
+    // And reading IIR acknowledges that one, so it does not repeat.
+    iir = uart.load(2, 1);
+    CHECK(iir);
+    CHECK((iir.value & 1) != 0);
+
+    // Received data outranks a free transmitter: an unread byte is lost if the
+    // next one arrives, while an idle transmitter will still be idle later.
+    uart.store(1, 1, 0x03);          // IER: both
+    uart.store(0, 1, 'h');           // make the transmitter empty again
+    uart.feed_input("y");
+    iir = uart.load(2, 1);
+    CHECK(iir);
+    CHECK_EQ_U((iir.value >> 1) & 0x7, 0x2);     // receive wins
+
+    // Bits 7:6 advertise working FIFOs, which is what makes a driver identify
+    // this as a 16550A rather than an earlier part.
+    CHECK_EQ_U((iir.value >> 6) & 0x3, 0x3);
+}
+
 void test_uart_dlab_switches_register_bank() {
     // With DLAB set, registers 0 and 1 become the baud-rate divisor rather than
     // data and interrupt-enable. A UART that ignored this would print the
@@ -335,6 +397,7 @@ int main() {
     test_uart_writes_appear_on_the_output();
     test_uart_lsr_reports_transmitter_ready();
     test_uart_reads_queued_input();
+    test_uart_iir_names_the_interrupt_cause();
     test_uart_dlab_switches_register_bank();
     test_clint_mtime_advances_with_instructions();
     test_clint_raises_timer_interrupt_at_the_deadline();
