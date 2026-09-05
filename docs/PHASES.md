@@ -19,8 +19,8 @@ modes. Linux additionally needs the C and F/D extensions, a device tree, and SBI
 | 5 | riscv-tests + CI | ✅ done |
 | 6 | S-mode + Sv39 MMU | ✅ done |
 | 7 | PLIC + virtio-blk — **boot xv6** | ✅ done |
-| 8 | Linux prerequisites (C, F/D, DTB, SBI) | 🔨 in progress |
-| 9 | **Boot Linux** | ⬜ |
+| 8 | Linux prerequisites (C, F/D, DTB, SBI) | ✅ done |
+| 9 | **Boot Linux** | 🔨 in progress |
 
 The first three phases were numbered before the roadmap existed. Phase 0 is
 numbered as it is because it is foundational work that logically precedes the
@@ -380,9 +380,56 @@ suite in the runner: **102/102 riscv-tests pass**.
 
 **Docs:** [`08-compressed-instructions.md`](08-compressed-instructions.md)
 
-### Still to do
+### Part 2: F and D — done
 
-- **F and D** - floating point. `C.FLD`/`C.FSD`/`C.FLDSP`/`C.FSDSP` are
-  deliberately left illegal until the registers they address exist.
-- **A device tree**, which Linux needs to discover the machine.
-- **SBI**, the supervisor-mode interface a Linux kernel calls into.
+Thirty-two more registers, shared between the two precisions - so a single is
+**NaN-boxed**, stored with its upper half all ones, which is the encoding of a
+quiet NaN. Read it as a double and you get a NaN rather than a
+plausible-looking wrong number. Every instruction that writes a single boxes it
+and every one that reads one checks the box, with exactly one exception:
+`FMV.X.W` is a raw bit move and must *not* unbox, since unboxing would replace
+the bits software asked to see. `rv64ud/move` check 71 caught that.
+
+`mstatus.FS` is an enable, not just a context-switch optimisation: while it is
+Off, every floating-point instruction and every `fcsr` access traps. That is how
+a kernel with no FPU support stops user code from corrupting a register file
+nobody is saving.
+
+**Three places RISC-V and C disagree**, each a silent wrong answer if you assume
+the host: out-of-range conversion saturates rather than being undefined;
+`std::nearbyint` suppresses the inexact flag that `fcvt` must raise (caught by
+`rv64uf/fcvt_w` check 2 - right number, wrong flags); and FMIN/FMAX are neither
+`fmin`/`fmax` nor a comparison, with `-0.0` defined as less than `+0.0`.
+
+**One documented deviation:** RMM (ties away from zero) has no C equivalent and
+no hardware support on x86 or ARM. It maps to round-to-nearest-even, which
+differs only on an exact tie.
+
+### Part 3: the device tree — done
+
+Linux gets everything it knows about the machine from a blob left in memory.
+`src/fdt.cpp` generates it directly rather than shelling out to `dtc` - not for
+dependency reasons but because it is then built from the same constants in
+`types.hpp` the devices are attached with, so it cannot drift out of agreement
+with them. The runner validates it by parsing it back with `dtc`.
+
+Two properties are easy to omit and fail confusingly: without `stdout-path`
+Linux has a UART driver *and* a node describing the UART and still boots
+silently; `riscv,isa` must match what the emulator implements exactly.
+
+### Part 4: SBI — done
+
+`mtimecmp` is a machine-mode register, so a supervisor cannot set its own timer.
+Implemented directly rather than by loading OpenSBI - real firmware would be
+more faithful but is a second binary to build and hides the boot behind 100 KB
+of code that is not the subject of this project. The kernel takes exactly the
+path it would on real hardware.
+
+Clearing MTIP in `set_timer` is required and easy to miss: the interrupt that
+just fired is still pending, and leaving it set makes the kernel re-enter its
+timer handler every instruction - which looks exactly like a hang.
+
+**Tests:** `tests/test_float.cpp` (124 checks), `tests/test_firmware.cpp` (76).
+**125/125 riscv-tests**, now including `rv64uf` 11/11 and `rv64ud` 12/12.
+
+**Docs:** [`08-linux-prerequisites.md`](08-linux-prerequisites.md)

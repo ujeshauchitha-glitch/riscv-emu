@@ -61,12 +61,13 @@ die()  { printf '%serror:%s %s\n' "$RED" "$OFF" "$1" >&2; exit 2; }
 # xv6's Makefile finds its own toolchain prefix, but it only looks for the two
 # common ones - so fail here with a useful message rather than inside make.
 TOOLPREFIX=""
-for p in riscv64-unknown-elf- riscv64-linux-gnu- riscv64-unknown-linux-gnu-; do
+for p in riscv64-unknown-elf- riscv64-elf- riscv64-linux-gnu- riscv64-unknown-linux-gnu-; do
   command -v "${p}gcc" > /dev/null && { TOOLPREFIX="$p"; break; }
 done
-[ -n "$TOOLPREFIX" ] || die "no RISC-V toolchain found. Install with:
-  sudo apt-get install gcc-riscv64-unknown-elf
-(or gcc-riscv64-linux-gnu)"
+[ -n "$TOOLPREFIX" ] || die "no RISC-V toolchain found. Install one with:
+  Debian/Ubuntu  sudo apt install gcc-riscv64-unknown-elf
+  Fedora         sudo dnf install gcc-riscv64-elf binutils-riscv64-elf
+  Arch           sudo pacman -S riscv64-elf-gcc riscv64-elf-binutils"
 
 command -v make > /dev/null || die "make not found"
 command -v git  > /dev/null || die "git not found"
