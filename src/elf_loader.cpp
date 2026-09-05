@@ -11,6 +11,8 @@ constexpr u32 PT_LOAD   = 1;
 constexpr u16 EM_RISCV  = 243;
 constexpr u8  ELFCLASS64 = 2;
 constexpr u8  ELFDATA2LSB = 1;
+constexpr u32 SHT_SYMTAB = 2;
+constexpr u32 SHT_STRTAB = 3;
 
 u16 rd16(const std::vector<u8>& b, u64 off) {
     return static_cast<u16>(b[off]) | (static_cast<u16>(b[off + 1]) << 8);
@@ -24,6 +26,51 @@ u64 rd64(const std::vector<u8>& b, u64 off) {
     u64 v = 0;
     for (int i = 0; i < 8; ++i) v |= static_cast<u64>(b[off + i]) << (8 * i);
     return v;
+}
+
+// Look up a symbol's address in the ELF symbol table.
+//
+// Walks the section headers for a SYMTAB, reads its linked string table, and
+// compares names. Returns 0 when the symbol (or the symbol table itself) is
+// absent, which is the normal case for a stripped or hand-assembled image.
+u64 find_symbol(const std::vector<u8>& b, u64 shoff, u16 shentsize, u16 shnum,
+                const char* want) {
+    if (shoff == 0 || shnum == 0) return 0;
+
+    for (u16 i = 0; i < shnum; ++i) {
+        const u64 sh = shoff + static_cast<u64>(i) * shentsize;
+        if (sh + 64 > b.size()) return 0;
+        if (rd32(b, sh + 4) != SHT_SYMTAB) continue;
+
+        const u64 sym_off  = rd64(b, sh + 24);
+        const u64 sym_size = rd64(b, sh + 32);
+        const u32 strtab_i = rd32(b, sh + 40);   // sh_link: the string table
+        const u64 sym_entsize = rd64(b, sh + 56);
+        if (sym_entsize == 0) continue;
+
+        // The linked string table holds the symbol names.
+        const u64 str_sh = shoff + static_cast<u64>(strtab_i) * shentsize;
+        if (str_sh + 64 > b.size()) continue;
+        if (rd32(b, str_sh + 4) != SHT_STRTAB) continue;
+        const u64 str_off  = rd64(b, str_sh + 24);
+        const u64 str_size = rd64(b, str_sh + 32);
+
+        for (u64 s = 0; s + sym_entsize <= sym_size; s += sym_entsize) {
+            const u64 ent = sym_off + s;
+            if (ent + 24 > b.size()) break;
+
+            const u32 name_off = rd32(b, ent + 0);
+            if (name_off == 0 || name_off >= str_size) continue;
+            if (str_off + name_off >= b.size()) continue;
+
+            const char* name = reinterpret_cast<const char*>(b.data() + str_off + name_off);
+            const u64 max_len = b.size() - (str_off + name_off);
+            if (std::strncmp(name, want, max_len) == 0) {
+                return rd64(b, ent + 8);   // st_value
+            }
+        }
+    }
+    return 0;
 }
 
 LoadedImage fail(const std::string& msg) {
@@ -53,8 +100,11 @@ LoadedImage load_elf(const std::vector<u8>& b, Bus& bus) {
 
     const u64 e_entry  = rd64(b, 24);
     const u64 e_phoff  = rd64(b, 32);
+    const u64 e_shoff  = rd64(b, 40);
     const u16 e_phentsize = rd16(b, 54);
     const u16 e_phnum  = rd16(b, 56);
+    const u16 e_shentsize = rd16(b, 58);
+    const u16 e_shnum  = rd16(b, 60);
 
     if (e_phnum == 0) return fail("no program headers");
 
@@ -95,5 +145,6 @@ LoadedImage load_elf(const std::vector<u8>& b, Bus& bus) {
     LoadedImage r;
     r.ok = true;
     r.entry = e_entry;
+    r.tohost = find_symbol(b, e_shoff, e_shentsize, e_shnum, "tohost");
     return r;
 }

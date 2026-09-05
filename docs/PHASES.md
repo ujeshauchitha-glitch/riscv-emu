@@ -16,8 +16,8 @@ modes. Linux additionally needs the C and F/D extensions, a device tree, and SBI
 | 2 | Zicsr + M-mode traps | ✅ done |
 | 3 | M and A extensions | ✅ done |
 | 4 | ELF loader, UART, CLINT — first output | ✅ done |
-| 5 | riscv-tests + CI | ⬜ next |
-| 6 | S-mode + Sv39 MMU | ⬜ |
+| 5 | riscv-tests + CI | ✅ done |
+| 6 | S-mode + Sv39 MMU | ⬜ next |
 | 7 | PLIC + virtio-blk — **boot xv6** | ⬜ |
 | 8 | Linux prerequisites (C, F/D, DTB, SBI) | ⬜ |
 | 9 | **Boot Linux** | ⬜ |
@@ -203,3 +203,34 @@ takes a timer interrupt and powers off. The self-test harness now also verifies
 console output.
 
 **Docs:** [`04-devices-and-mmio.md`](04-devices-and-mmio.md)
+
+## Phase 5: riscv-tests + CI — done
+
+Correctness no longer rests on tests written alongside the emulator. The suite
+the RISC-V project maintains now runs against it: **96/96 passing**, 3 excluded
+for features not implemented yet.
+
+| Suite | Result |
+|---|---|
+| `rv64ui` base integer | 54/54 |
+| `rv64um` multiply/divide | 13/13 |
+| `rv64ua` atomics | 19/19 |
+| `rv64mi` machine mode | 10/10 |
+
+**Added:** `tests/riscv-tests-env/` (a self-contained replacement for the
+upstream `riscv-test-env` submodule, which was unreachable here), HTIF `tohost`
+support in the emulator — ELF symbol lookup plus polling — a runner script, and
+GitHub Actions CI. The repository had no CI before.
+
+**The bug it found.** `rv64mi-instret_overflow` writes 0 to `minstret` and reads
+it straight back. `step()` was *assigning* the counter from the emulator's own
+instruction count, so any guest write was discarded on the next instruction.
+Counters now increment, and an instruction that writes one does not also
+increment it — so the value read back is exactly what was written.
+
+**Excluded, with reasons:** `illegal` needs supervisor mode (phase 6, worth
+re-running then); `breakpoint` needs the debug trigger module; `pmpaddr` needs
+PMP. Both of the latter are optional and not required by xv6 or Linux. They are
+listed explicitly in the runner rather than dropped.
+
+**Docs:** [`05-testing.md`](05-testing.md)
