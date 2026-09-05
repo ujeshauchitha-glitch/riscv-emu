@@ -131,8 +131,14 @@ void test_mstatus_masks_unimplemented_bits() {
     CHECK((status & csr::MSTATUS_MIE) != 0);
     CHECK((status & csr::MSTATUS_MPIE) != 0);
     CHECK_EQ_U((status & csr::MSTATUS_MPP) >> csr::MSTATUS_MPP_SHIFT, PRIV_MACHINE);
-    // ...and nothing else is.
-    const u64 implemented = csr::MSTATUS_MIE | csr::MSTATUS_MPIE | csr::MSTATUS_MPP;
+    // ...and nothing else is. Phase 6 added the supervisor bits, so the set of
+    // implemented bits grew; anything outside it must still read back as zero
+    // however the guest writes it.
+    const u64 implemented =
+        csr::MSTATUS_MIE | csr::MSTATUS_MPIE | csr::MSTATUS_MPP |
+        csr::MSTATUS_SIE | csr::MSTATUS_SPIE | csr::MSTATUS_SPP |
+        csr::MSTATUS_MPRV | csr::MSTATUS_SUM | csr::MSTATUS_MXR |
+        csr::MSTATUS_TVM | csr::MSTATUS_TW | csr::MSTATUS_TSR;
     CHECK_EQ_U(status & ~implemented, 0);
 }
 

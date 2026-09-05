@@ -8,21 +8,33 @@ constexpr u64 MISA_MXL_64 = 2ull << 62;
 // One bit per supported extension, bit 0 = 'A' ... bit 25 = 'Z'.
 constexpr u64 misa_ext(char c) { return 1ull << (c - 'A'); }
 
-// Only the machine-level interrupts exist while M-mode is the only privilege
-// level. Phase 6 widens this to include the supervisor bits.
-constexpr u64 INTERRUPT_MASK = csr::MIP_MSIP | csr::MIP_MTIP | csr::MIP_MEIP;
+// Every interrupt source that exists, machine and supervisor.
+constexpr u64 INTERRUPT_MASK =
+    csr::MIP_MSIP | csr::MIP_MTIP | csr::MIP_MEIP |
+    csr::MIP_SSIP | csr::MIP_STIP | csr::MIP_SEIP;
 
-// mstatus bits that are writable in this phase. Everything else is WPRI
-// (reserved) or belongs to a privilege level that does not exist yet, and must
+// The supervisor pending bits M-mode software may write directly. Unlike the
+// machine ones - which the CLINT and PLIC own - SSIP is genuinely software-set:
+// it is how M-mode posts a supervisor software interrupt.
+constexpr u64 MIP_SOFTWARE_WRITABLE = csr::MIP_SSIP | csr::MIP_STIP | csr::MIP_SEIP;
+
+// mstatus bits that are writable. Everything else is WPRI (reserved) and must
 // read back as zero however the guest writes it.
-constexpr u64 MSTATUS_MASK = csr::MSTATUS_MIE | csr::MSTATUS_MPIE | csr::MSTATUS_MPP;
+constexpr u64 MSTATUS_MASK =
+    csr::MSTATUS_MIE | csr::MSTATUS_MPIE | csr::MSTATUS_MPP |
+    csr::MSTATUS_SIE | csr::MSTATUS_SPIE | csr::MSTATUS_SPP |
+    csr::MSTATUS_MPRV | csr::MSTATUS_SUM | csr::MSTATUS_MXR |
+    csr::MSTATUS_TVM | csr::MSTATUS_TW | csr::MSTATUS_TSR;
 
 }  // namespace
 
 CsrFile::CsrFile() {
     // misa advertises the ISA. C and F/D join in phase 8. Guest code reads this
     // to decide what it may use, so it must not claim more than we deliver.
-    raw_[csr::MISA] = MISA_MXL_64 | misa_ext('I') | misa_ext('M') | misa_ext('A');
+    // 'S' and 'U' announce that supervisor and user mode exist. A kernel checks
+    // misa before trying to drop privilege.
+    raw_[csr::MISA] = MISA_MXL_64 | misa_ext('I') | misa_ext('M') | misa_ext('A') |
+                      misa_ext('S') | misa_ext('U');
 
     // A single hart, numbered 0. Every RISC-V system must have a hart 0, and
     // kernels use mhartid to pick which core runs the boot path.
@@ -62,6 +74,18 @@ bool CsrFile::exists(u32 addr) const {
         case csr::CYCLE:
         case csr::TIME:
         case csr::INSTRET:
+        // Supervisor registers. sstatus/sie/sip are views onto their machine
+        // counterparts rather than storage of their own; see read()/write().
+        case csr::SSTATUS:
+        case csr::SIE:
+        case csr::STVEC:
+        case csr::SCOUNTEREN:
+        case csr::SSCRATCH:
+        case csr::SEPC:
+        case csr::SCAUSE:
+        case csr::STVAL:
+        case csr::SIP:
+        case csr::SATP:
             return true;
         default:
             // Everything else is unimplemented, and reading or writing it is an
@@ -76,6 +100,14 @@ u64 CsrFile::read(u32 addr) const {
     switch (addr) {
         case csr::CYCLE:   return raw_[csr::MCYCLE];
         case csr::INSTRET: return raw_[csr::MINSTRET];
+
+        // The supervisor views. Reading sstatus reads the *same bits* as
+        // mstatus, with the machine-only ones masked out - there is no second
+        // copy that could drift out of step with the first.
+        case csr::SSTATUS: return raw_[csr::MSTATUS] & csr::SSTATUS_MASK;
+        case csr::SIE:     return raw_[csr::MIE] & csr::SIE_SIP_MASK;
+        case csr::SIP:     return raw_[csr::MIP] & csr::SIE_SIP_MASK;
+
         default:           return raw_[addr & 0xfff];
     }
 }
@@ -94,7 +126,7 @@ u64 CsrFile::write_mask(u32 addr) {
         //
         // Phase 6 opens SSIP, which M-mode software genuinely may write to
         // post a supervisor software interrupt.
-        case csr::MIP:      return 0;
+        case csr::MIP:      return MIP_SOFTWARE_WRITABLE;
 
         // misa is WARL and we do not support disabling extensions, so writes
         // are ignored entirely.
@@ -119,6 +151,45 @@ void CsrFile::write(u32 addr, u64 value) {
             // mtvec holds a base address and a mode in its low two bits. Only
             // modes 0 (direct) and 1 (vectored) are defined; the field is WARL,
             // so an unsupported mode is coerced rather than stored.
+            u64 mode = value & csr::MTVEC_MODE_MASK;
+            if (mode > csr::MTVEC_MODE_VECTORED) mode = csr::MTVEC_MODE_DIRECT;
+            raw_[a] = (value & ~csr::MTVEC_MODE_MASK) | mode;
+            return;
+        }
+
+        // Writing a supervisor view writes through to the machine register,
+        // touching only the bits that view exposes.
+        case csr::SSTATUS:
+            raw_[csr::MSTATUS] = (raw_[csr::MSTATUS] & ~csr::SSTATUS_MASK) |
+                                 (value & csr::SSTATUS_MASK);
+            return;
+        case csr::SIE:
+            raw_[csr::MIE] = (raw_[csr::MIE] & ~csr::SIE_SIP_MASK) |
+                             (value & csr::SIE_SIP_MASK);
+            return;
+        case csr::SIP:
+            // Only SSIP is writable through sip; STIP and SEIP are driven by
+            // hardware, as their machine counterparts are.
+            raw_[csr::MIP] = (raw_[csr::MIP] & ~csr::MIP_SSIP) |
+                             (value & csr::MIP_SSIP);
+            return;
+
+        case csr::SATP: {
+            // Only Bare and Sv39 are supported. satp's MODE field is WARL, so
+            // an unsupported mode is ignored entirely rather than stored - that
+            // is how a kernel discovers Sv48 is unavailable: it writes the
+            // mode, reads it back, and finds its request did not take.
+            const u64 mode = (value & csr::SATP_MODE_MASK) >> csr::SATP_MODE_SHIFT;
+            if (mode != csr::SATP_MODE_BARE && mode != csr::SATP_MODE_SV39) return;
+            raw_[a] = value;
+            return;
+        }
+
+        case csr::SEPC:
+            raw_[a] = value & ~3ull;   // as mepc: an instruction address
+            return;
+
+        case csr::STVEC: {
             u64 mode = value & csr::MTVEC_MODE_MASK;
             if (mode > csr::MTVEC_MODE_VECTORED) mode = csr::MTVEC_MODE_DIRECT;
             raw_[a] = (value & ~csr::MTVEC_MODE_MASK) | mode;

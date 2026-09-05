@@ -33,6 +33,7 @@ add_library(riscv_core STATIC
   src/clint.cpp
   src/csr.cpp
   src/elf_loader.cpp
+  src/mmu.cpp
   src/decoder.cpp
   src/dram.cpp
   src/syscon.cpp
@@ -57,6 +58,7 @@ set(RISCV_EMU_TESTS
   test_csr
   test_muldiv_atomic
   test_devices
+  test_supervisor
 )
 
 foreach(test_name IN LISTS RISCV_EMU_TESTS)
