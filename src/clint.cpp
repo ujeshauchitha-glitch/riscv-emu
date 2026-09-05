@@ -21,6 +21,14 @@ void Clint::update(CsrFile& csrs) const {
     if (csrs.sstc_enabled()) {
         if (mtime_ >= csrs.read(csr::STIMECMP)) csrs.raise_interrupt(csr::MIP_STIP);
         else                                    csrs.clear_interrupt(csr::MIP_STIP);
+    } else if (sbi_timer_) {
+        // No Sstc, but a supervisor armed this deadline through SBI - so the
+        // machine-timer expiry is forwarded as a *supervisor* timer interrupt,
+        // which is exactly what M-mode firmware does on real hardware. Without
+        // this the deadline expires into a bit no supervisor can enable, and
+        // the kernel's clock never advances.
+        if (mtime_ >= mtimecmp_) csrs.raise_interrupt(csr::MIP_STIP);
+        else                     csrs.clear_interrupt(csr::MIP_STIP);
     }
 }
 

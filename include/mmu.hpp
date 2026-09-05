@@ -79,8 +79,9 @@ private:
     // by ASID so a context switch need not flush everything; the same shape is
     // used here.
     struct Entry {
-        u64 ppn;    // physical page number of the mapped page
-        u64 perms;  // the leaf PTE's permission bits
+        u64 ppn;       // physical page number of the mapped page
+        u64 perms;     // the leaf PTE's permission bits
+        u64 pte_addr;  // where that PTE lives, so D can be set on a later store
     };
     std::unordered_map<u64, Entry> tlb_;
     u64 hits_ = 0;

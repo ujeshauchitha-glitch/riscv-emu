@@ -190,8 +190,13 @@ std::vector<u8> Fdt::build(u64 dram_bytes, const std::string& bootargs,
     // particular UART is the console.
     t.prop_string("stdout-path", "/soc/serial@10000000");
     if (initrd_end > initrd_start) {
-        t.prop_u32("linux,initrd-start", static_cast<u32>(initrd_start));
-        t.prop_u32("linux,initrd-end", static_cast<u32>(initrd_end));
+        // 64-bit, not 32. With more than 4 GiB of guest RAM the initramfs is
+        // placed above the 4 GiB line, and a 32-bit property truncates that to
+        // an address below DRAM_BASE with no memory behind it - Linux then
+        // reserves the wrong region and either fails to unpack the initramfs or
+        // corrupts whatever is there.
+        t.prop_u64("linux,initrd-start", initrd_start);
+        t.prop_u64("linux,initrd-end", initrd_end);
     }
     t.end_node();
 

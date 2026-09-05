@@ -11,8 +11,10 @@ constexpr u64 MAGIC_VALUE      = 0x000;
 constexpr u64 VERSION          = 0x004;
 constexpr u64 DEVICE_ID        = 0x008;
 constexpr u64 VENDOR_ID        = 0x00c;
-constexpr u64 DEVICE_FEATURES  = 0x010;
-constexpr u64 DRIVER_FEATURES  = 0x020;
+constexpr u64 DEVICE_FEATURES     = 0x010;
+constexpr u64 DEVICE_FEATURES_SEL = 0x014;
+constexpr u64 DRIVER_FEATURES     = 0x020;
+constexpr u64 DRIVER_FEATURES_SEL = 0x024;
 constexpr u64 QUEUE_SEL        = 0x030;
 constexpr u64 QUEUE_NUM_MAX    = 0x034;
 constexpr u64 QUEUE_NUM        = 0x038;
@@ -43,6 +45,21 @@ constexpr u32 BLK_T_IN  = 0;    // read from disk
 constexpr u32 BLK_T_OUT = 1;    // write to disk
 
 constexpr u32 FEATURES_OK = 8;
+
+// VIRTIO_F_VERSION_1, feature bit 32: "this device speaks the modern protocol
+// rather than the legacy one". A version-2 MMIO device that does not offer it
+// is a contradiction, and Linux says so - virtio_finalize_features refuses with
+// "device uses modern interface but does not have VIRTIO_F_VERSION_1" and never
+// probes the device at all.
+//
+// The feature space is 64 bits wide but the registers are 32, so a driver reads
+// it in two halves: it writes 0 or 1 to DeviceFeaturesSel and then reads
+// DeviceFeatures. Bit 32 lives in the upper half, which is why ignoring the
+// select register makes it unreachable however many bits the device sets.
+//
+// xv6 never checks this, which is why the phase 7 boot worked without it.
+constexpr u64 F_VERSION_1 = 1ull << 32;
+constexpr u64 DEVICE_FEATURE_BITS = F_VERSION_1;
 }  // namespace
 
 bool VirtioBlk::load_image(const std::string& path) {
@@ -95,7 +112,19 @@ void VirtioBlk::process_chain(u16 head) {
     u8 status = 0;   // 0 = OK
     const u64 offset = sector * SECTOR_SIZE;
 
-    if (offset + buf_len > disk_.size()) {
+    // Bounds-check by subtraction, not addition.
+    //
+    // The obvious `offset + buf_len > disk_.size()` overflows: a guest that
+    // asks for sector 0x7fff_ffff_ffc0_00 with a 2 GiB buffer makes the sum
+    // wrap to zero, the check passes, and the loops below index two gigabytes
+    // *before* the start of the vector. That is an out-of-bounds host read for
+    // BLK_T_IN and an out-of-bounds host *write* for BLK_T_OUT - the device is
+    // a bus master reading guest-controlled descriptors, so every field here is
+    // hostile input.
+    //
+    // Comparing against `disk_.size() - buf_len` cannot wrap, because the
+    // buf_len check runs first.
+    if (buf_len > disk_.size() || offset > disk_.size() - buf_len) {
         status = 1;   // IOERR: the request runs off the end of the disk
     } else if (type == BLK_T_IN) {
         // Read: disk -> guest memory. The descriptor must be device-writable;
@@ -172,9 +201,12 @@ Result<u64> VirtioBlk::load(u64 offset, unsigned size_bytes) {
         case DEVICE_ID:        return Result<u64>::good(BLOCK_DEVICE);
         case VENDOR_ID:        return Result<u64>::good(VENDOR);
 
-        // We advertise no optional features. Everything xv6 masks off is
-        // already absent, and a bare block device needs none of them.
-        case DEVICE_FEATURES:  return Result<u64>::good(0);
+        // The half of the feature space the driver most recently selected.
+        // Everything optional is absent - a bare block device needs none of
+        // it - but VIRTIO_F_VERSION_1 is not optional for a version-2 device.
+        case DEVICE_FEATURES:
+            return Result<u64>::good(
+                static_cast<u32>(DEVICE_FEATURE_BITS >> (device_features_sel_ * 32)));
 
         case QUEUE_NUM_MAX:    return Result<u64>::good(QUEUE_MAX);
         case QUEUE_READY:      return Result<u64>::good(queue_ready_);
@@ -191,7 +223,15 @@ Status VirtioBlk::store(u64 offset, unsigned size_bytes, u64 value) {
     const u32 v = static_cast<u32>(value);
 
     switch (offset) {
-        case DRIVER_FEATURES: driver_features_ = v; break;
+        case DEVICE_FEATURES_SEL: device_features_sel_ = (v != 0) ? 1 : 0; break;
+        case DRIVER_FEATURES_SEL: driver_features_sel_ = (v != 0) ? 1 : 0; break;
+
+        case DRIVER_FEATURES:
+            // The driver acknowledges features the same way it read them, one
+            // 32-bit half at a time.
+            driver_features_ &= ~(0xffffffffull << (driver_features_sel_ * 32));
+            driver_features_ |= (v & 0xffffffffull) << (driver_features_sel_ * 32);
+            break;
         case QUEUE_SEL:       queue_sel_ = v; break;
         case QUEUE_NUM:       queue_num_ = v; break;
         case QUEUE_READY:     queue_ready_ = v; break;

@@ -354,6 +354,58 @@ void test_virtio_rejects_a_request_past_the_end_of_the_disk() {
     CHECK(rig.peek(STATUS_ADDR, 1) != 0);
 }
 
+// --- regressions ------------------------------------------------------------
+
+void test_plic_registers_beyond_the_bitmaps_read_zero() {
+    // The pending and enable bitmaps are 64 bits, so only words 0 and 1 exist.
+    // A read of word 2 shifts a u64 by 64, which is undefined behaviour - and
+    // on x86 the shift count is taken modulo 64, so word 2 quietly aliases word
+    // 0 and reports interrupts that are not pending.
+    Plic plic;
+    plic.store(PLIC_ENABLE, 4, 0xdeadbeef);
+    plic.set_pending(UART0_IRQ, true);
+
+    CHECK_EQ_U(read32(plic, PLIC_ENABLE), 0xdeadbeef);
+    CHECK_EQ_U(read32(plic, PLIC_ENABLE + 8), 0);       // word 2: nothing there
+    CHECK_EQ_U(read32(plic, PLIC_PENDING + 8), 0);
+}
+
+void test_virtio_offers_version_1() {
+    // A version-2 MMIO device that does not offer VIRTIO_F_VERSION_1 is a
+    // contradiction, and Linux refuses it: "device uses modern interface but
+    // does not have VIRTIO_F_VERSION_1", and the device is never probed.
+    //
+    // The bit is number 32, in the upper half of a 64-bit feature space read
+    // through 32-bit registers - so it is only reachable if the device honours
+    // the select register. Setting the bit without honouring the select would
+    // leave it just as invisible.
+    DiskRig rig(4);
+
+    rig.blk->store(0x014, 4, 0);                 // DeviceFeaturesSel = 0
+    auto low = rig.blk->load(0x010, 4);
+    CHECK(low);
+    CHECK_EQ_U(low.value, 0);                    // no optional features
+
+    rig.blk->store(0x014, 4, 1);                 // DeviceFeaturesSel = 1
+    auto high = rig.blk->load(0x010, 4);
+    CHECK(high);
+    CHECK_EQ_U(high.value, 1);                   // bit 32 = VIRTIO_F_VERSION_1
+}
+
+void test_virtio_rejects_a_request_that_would_overflow_the_bounds_check() {
+    // The obvious bounds check, `offset + length > size`, overflows: a sector
+    // number near 2^55 makes the sum wrap to zero and the check passes, after
+    // which the device indexes gigabytes outside its own buffer. Every field
+    // here comes from guest-written descriptors, so all of it is hostile input.
+    DiskRig rig(4);
+    rig.setup_queue();
+    rig.submit(/*type=*/0, /*sector=*/0x7fff'ffff'ffc0'00ull, 0);
+
+    // Refused with a non-zero status, and - the part that matters - still here
+    // to say so.
+    CHECK(rig.peek(STATUS_ADDR, 1) != 0);
+}
+
 }  // namespace
 
 int main() {
@@ -371,5 +423,9 @@ int main() {
     test_virtio_raises_an_interrupt_through_the_plic();
     test_virtio_handles_several_requests_in_sequence();
     test_virtio_rejects_a_request_past_the_end_of_the_disk();
+
+    test_plic_registers_beyond_the_bitmaps_read_zero();
+    test_virtio_offers_version_1();
+    test_virtio_rejects_a_request_that_would_overflow_the_bounds_check();
     return testutil::summary("interrupt devices");
 }

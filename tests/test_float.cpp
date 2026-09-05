@@ -472,6 +472,32 @@ void test_single_precision_arithmetic_stays_single() {
 
 // --- fused multiply-add -----------------------------------------------------
 
+void test_int_to_float_converts_directly_rather_than_via_double() {
+    // 2^53 + 2^29 + 1, converted to a single.
+    //
+    // Routing through a double rounds twice, and the two roundings do not
+    // compose: the intermediate lands exactly on a float tie, and
+    // round-half-to-even then breaks it the other way. The result is one ULP
+    // from the architecturally required answer - the kind of error that is
+    // invisible until it is not.
+    const u32 FCVT_S_L = fp_op(0x68, 2, 1, 0x7, 2);   // funct7 0x68 = FCVT.S.*
+    Machine m = fpu_machine({FCVT_S_L});
+    m.cpu->regs[1] = 0x0020'0000'2000'0001ull;
+    CHECK(m.cpu->step());
+    CHECK_EQ_U(m.cpu->fregs[2], nan_box(0x5a000001));
+}
+
+void test_reserved_conversion_encodings_are_illegal() {
+    // rs2 names the source width and signedness for an integer-to-float
+    // conversion; 4..31 are reserved. Accepting one and writing zero gives a
+    // guest probing for an unimplemented conversion a wrong answer instead of
+    // the trap it is waiting for.
+    Machine m = fpu_machine({fp_op(0x68, 7, 1, 0x7, 2)});
+    const Status st = m.cpu->step();
+    CHECK(!st);
+    CHECK(st.trap.cause == Exception::IllegalInstruction);
+}
+
 void test_fma_rounds_once() {
     // The point of a fused multiply-add is that the product is not rounded
     // before the addition: a*b+c is computed once and rounded once. Computing
@@ -534,6 +560,8 @@ int main() {
     test_integer_to_float_and_back();
     test_single_precision_arithmetic_stays_single();
 
+    test_int_to_float_converts_directly_rather_than_via_double();
+    test_reserved_conversion_encodings_are_illegal();
     test_fma_rounds_once();
     return testutil::summary("float");
 }

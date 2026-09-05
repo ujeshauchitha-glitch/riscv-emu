@@ -4,6 +4,18 @@
 
 namespace {
 
+// Does [offset, offset + length) lie inside the file?
+//
+// Written as a subtraction because the obvious `offset + length > size` can
+// overflow: a crafted header with p_offset near 2^64 and a small p_filesz makes
+// the sum wrap to something small, the check passes, and the copy loop
+// dereferences wildly out of bounds. An ELF file is untrusted input - it is
+// the one thing here that arrives from outside - so every bound is checked this
+// way.
+bool fits(const std::vector<u8>& b, u64 offset, u64 length) {
+    return length <= b.size() && offset <= b.size() - length;
+}
+
 // Just enough of the ELF64 format to load an image. Field offsets are from the
 // ELF specification; the file is little-endian for RISC-V.
 constexpr u64 EI_NIDENT = 16;
@@ -39,7 +51,7 @@ u64 find_symbol(const std::vector<u8>& b, u64 shoff, u16 shentsize, u16 shnum,
 
     for (u16 i = 0; i < shnum; ++i) {
         const u64 sh = shoff + static_cast<u64>(i) * shentsize;
-        if (sh + 64 > b.size()) return 0;
+        if (!fits(b, sh, 64)) return 0;
         if (rd32(b, sh + 4) != SHT_SYMTAB) continue;
 
         const u64 sym_off  = rd64(b, sh + 24);
@@ -50,18 +62,18 @@ u64 find_symbol(const std::vector<u8>& b, u64 shoff, u16 shentsize, u16 shnum,
 
         // The linked string table holds the symbol names.
         const u64 str_sh = shoff + static_cast<u64>(strtab_i) * shentsize;
-        if (str_sh + 64 > b.size()) continue;
+        if (!fits(b, str_sh, 64)) continue;
         if (rd32(b, str_sh + 4) != SHT_STRTAB) continue;
         const u64 str_off  = rd64(b, str_sh + 24);
         const u64 str_size = rd64(b, str_sh + 32);
 
         for (u64 s = 0; s + sym_entsize <= sym_size; s += sym_entsize) {
             const u64 ent = sym_off + s;
-            if (ent + 24 > b.size()) break;
+            if (!fits(b, ent, 24)) break;
 
             const u32 name_off = rd32(b, ent + 0);
             if (name_off == 0 || name_off >= str_size) continue;
-            if (str_off + name_off >= b.size()) continue;
+            if (!fits(b, str_off, name_off + 1)) continue;
 
             const char* name = reinterpret_cast<const char*>(b.data() + str_off + name_off);
             const u64 max_len = b.size() - (str_off + name_off);
@@ -111,7 +123,7 @@ LoadedImage load_elf(const std::vector<u8>& b, Bus& bus) {
     unsigned loaded = 0;
     for (u16 i = 0; i < e_phnum; ++i) {
         const u64 ph = e_phoff + static_cast<u64>(i) * e_phentsize;
-        if (ph + 56 > b.size()) return fail("program header out of range");
+        if (!fits(b, ph, 56)) return fail("program header out of range");
 
         if (rd32(b, ph + 0) != PT_LOAD) continue;
 
@@ -120,7 +132,7 @@ LoadedImage load_elf(const std::vector<u8>& b, Bus& bus) {
         const u64 p_filesz = rd64(b, ph + 32);
         const u64 p_memsz  = rd64(b, ph + 40);
 
-        if (p_offset + p_filesz > b.size()) return fail("segment extends past end of file");
+        if (!fits(b, p_offset, p_filesz)) return fail("segment extends past end of file");
         if (p_memsz < p_filesz) return fail("segment memsz < filesz");
 
         // Copy the bytes present in the file...
