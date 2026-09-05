@@ -20,7 +20,23 @@ on an emulator written from scratch:
 [    9.936166] Run /init as init process
 
   Linux is running on the riscv-emu emulator.
+
+# uptime
+9.96 0.00
+
+# interrupts
+           CPU0
+ 11:       2494  RISC-V INTC   5 Edge      riscv-timer
+ 12:         10  SiFive PLIC  10 Edge      ttyS0
+ 13:          0  SiFive PLIC   1 Edge      virtio0
+
+# poweroff
+[   10.134004] reboot: Power down
 ```
+
+The prompt is interactive, and that `/proc/interrupts` is the machine
+reporting on itself: timer interrupts arriving through SBI, console interrupts
+through the PLIC, virtio registered.
 
 **And xv6.** It reaches a shell prompt, the prompt can be typed at, `usertests`
 passes in full, and `ls` and `cat` read real data off a virtio disk image:
