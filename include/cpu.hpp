@@ -85,6 +85,12 @@ public:
     Result<u64> mem_load(u64 vaddr, unsigned size, AccessType type);
     Status      mem_store(u64 vaddr, unsigned size, u64 value);
 
+    // Does this access span two pages, and so need two translations? RISC-V
+    // permits misaligned accesses, so ordinary guest code reaches this.
+    static bool crosses_page(u64 vaddr, unsigned size);
+    Result<u64> load_across_pages(u64 vaddr, unsigned size, AccessType type);
+    Status      store_across_pages(u64 vaddr, unsigned size, u64 value);
+
     // Execute an already-decoded instruction. `next_pc_` is pre-set to the next
     // instruction (pc + 2 or pc + 4)
     // by step(); control-transfer instructions overwrite it.

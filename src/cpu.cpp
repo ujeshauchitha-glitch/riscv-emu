@@ -57,6 +57,8 @@ u32 Cpu::data_privilege() const {
 }
 
 Result<u64> Cpu::mem_load(u64 vaddr, unsigned size, AccessType type) {
+    if (crosses_page(vaddr, size)) return load_across_pages(vaddr, size, type);
+
     const u32 p = (type == AccessType::Instruction) ? priv : data_privilege();
     Result<u64> pa = mmu.translate(vaddr, type, p, csrs);
     if (!pa) return pa;
@@ -64,9 +66,67 @@ Result<u64> Cpu::mem_load(u64 vaddr, unsigned size, AccessType type) {
 }
 
 Status Cpu::mem_store(u64 vaddr, unsigned size, u64 value) {
+    if (crosses_page(vaddr, size)) return store_across_pages(vaddr, size, value);
+
     Result<u64> pa = mmu.translate(vaddr, AccessType::Store, data_privilege(), csrs);
     if (!pa) return Status::bad(pa.trap);
     return bus_.store(pa.value, size, value);
+}
+
+// ---------------------------------------------------------------------------
+// Accesses that straddle a page boundary.
+//
+// Translation is per page, so an access whose bytes fall in two pages needs two
+// translations - and the second page may be unmapped, read-only, or owned by
+// somebody else. Translating only the starting address and then reading `size`
+// contiguous *physical* bytes silently walks off the end of the first page's
+// frame into whatever physical memory happens to follow it, with no fault and
+// no permission check.
+//
+// RISC-V allows misaligned accesses, so this is reachable from ordinary guest
+// code rather than being a corner case a kernel would have to go looking for.
+// fetch_inst() already splits into two translated halfword reads for exactly
+// this reason; the data path needs the same treatment.
+//
+// The split path is byte at a time, which is slow - and does not matter,
+// because it only runs for the rare access that actually crosses. Everything
+// aligned, and everything misaligned within one page, takes the fast path
+// above untouched.
+// ---------------------------------------------------------------------------
+bool Cpu::crosses_page(u64 vaddr, unsigned size) {
+    return (vaddr & (PAGE_SIZE - 1)) + size > PAGE_SIZE;
+}
+
+Result<u64> Cpu::load_across_pages(u64 vaddr, unsigned size, AccessType type) {
+    u64 value = 0;
+    for (unsigned i = 0; i < size; ++i) {
+        Result<u64> pa = mmu.translate(vaddr + i, type, data_privilege(), csrs);
+        if (!pa) return Result<u64>::bad(pa.trap);
+        Result<u64> b = bus_.load(pa.value, 1, type);
+        if (!b) return b;
+        value |= (b.value & 0xff) << (8 * i);
+    }
+    return Result<u64>::good(value);
+}
+
+Status Cpu::store_across_pages(u64 vaddr, unsigned size, u64 value) {
+    // Both halves are translated before either is written. A store that faulted
+    // halfway would leave the first page modified by an instruction the guest
+    // is about to re-execute after fixing the mapping, and it would then write
+    // those bytes twice.
+    for (unsigned i = 0; i < size; ++i) {
+        Result<u64> pa = mmu.translate(vaddr + i, AccessType::Store,
+                                       data_privilege(), csrs);
+        if (!pa) return Status::bad(pa.trap);
+    }
+    for (unsigned i = 0; i < size; ++i) {
+        Result<u64> pa = mmu.translate(vaddr + i, AccessType::Store,
+                                       data_privilege(), csrs);
+        if (!pa) return Status::bad(pa.trap);
+        Status st = bus_.store(pa.value, 1, (value >> (8 * i)) & 0xff);
+        if (!st) return st;
+    }
+    return Status::good();
 }
 
 // Fetch the instruction at the PC, whatever length it turns out to be.
@@ -313,9 +373,19 @@ bool Cpu::next_interrupt(Interrupt& out) const {
 
     // An interrupt is enabled for a mode when we are *below* that mode - a less
     // privileged context can always be interrupted by a more privileged one -
-    // or when we are in it and its global enable is set.
+    // or when we are *in* that exact mode and its global enable is set.
+    //
+    // The "exact mode" half matters for the supervisor case and is easy to get
+    // wrong. Trap entry into machine mode clears MIE but leaves SIE alone, so a
+    // hart that took a trap out of supervisor mode sits in M-mode with SIE
+    // still set. Testing `sstatus.SIE` without also checking that we are in
+    // supervisor mode then lets a delegated interrupt fire while running in
+    // machine mode - and enter_trap, seeing priv > S, would deliver a
+    // supervisor-cause interrupt to mtvec. Under --linux or xv6 mtvec is zero,
+    // so that vectors to address 0 and the machine wanders off.
     const bool m_enabled = (priv < PRIV_MACHINE) || csrs.mstatus_mie();
-    const bool s_enabled = (priv < PRIV_SUPERVISOR) || csrs.mstatus_sie();
+    const bool s_enabled = (priv < PRIV_SUPERVISOR) ||
+                           (priv == PRIV_SUPERVISOR && csrs.mstatus_sie());
 
     // Machine-mode interrupts (those not delegated) outrank supervisor ones.
     const u64 m_ready = ready & ~mideleg;
@@ -345,6 +415,16 @@ Status Cpu::run(u64 max_steps, u64* steps_out) {
             if (steps_out) *steps_out = n;
             return st;
         }
+        // Anything that set `halted` during the instruction stops the run -
+        // SBI's shutdown call does exactly that, and without this check the
+        // guest keeps executing until the step budget runs out. A Linux
+        // `poweroff` would spin through the remaining hundred million
+        // instructions before the emulator noticed.
+        if (halted) {
+            if (steps_out) *steps_out = n + 1;
+            return Status::good();
+        }
+
         // A guest that writes the poweroff word to syscon has asked to stop.
         if (syscon && (syscon->poweroff_requested() || syscon->reboot_requested())) {
             halted = true;
@@ -813,17 +893,38 @@ Status Cpu::execute_op_fp(const DecodedInst& inst) {
         }
 
         case 0x1a: {  // FCVT.S/D.W/WU/L/LU - integer to float
+            // rs2 names the source width and signedness; 4..31 are reserved.
+            // Accepting them and writing zero would give a guest probing for an
+            // unimplemented conversion a wrong answer instead of the trap it is
+            // waiting for.
+            if (inst.rs2 > 3) {
+                return Status::bad(Exception::IllegalInstruction, inst.encoded);
+            }
             const u64 x = read_reg(inst.rs1);
             return with_rounding(inst, [&] {
-                double v = 0;
-                switch (inst.rs2) {
-                    case 0: v = static_cast<double>(static_cast<i32>(x)); break;
-                    case 1: v = static_cast<double>(static_cast<u32>(x)); break;
-                    case 2: v = static_cast<double>(static_cast<i64>(x)); break;
-                    case 3: v = static_cast<double>(x); break;
-                    default: break;
+                if (is_double) {
+                    switch (inst.rs2) {
+                        case 0: store_f64(static_cast<double>(static_cast<i32>(x))); break;
+                        case 1: store_f64(static_cast<double>(static_cast<u32>(x))); break;
+                        case 2: store_f64(static_cast<double>(static_cast<i64>(x))); break;
+                        default: store_f64(static_cast<double>(x)); break;
+                    }
+                } else {
+                    // Straight to float, never via double.
+                    //
+                    // Going through a double rounds twice, and the two roundings
+                    // do not compose: a 64-bit integer that lands exactly on a
+                    // float tie after the first rounding is then broken the
+                    // wrong way by round-half-to-even, giving a result one ULP
+                    // from the architecturally required answer. 2^53 + 2^29 + 1
+                    // is such a value.
+                    switch (inst.rs2) {
+                        case 0: store_f32(static_cast<float>(static_cast<i32>(x))); break;
+                        case 1: store_f32(static_cast<float>(static_cast<u32>(x))); break;
+                        case 2: store_f32(static_cast<float>(static_cast<i64>(x))); break;
+                        default: store_f32(static_cast<float>(x)); break;
+                    }
                 }
-                if (is_double) store_f64(v); else store_f32(static_cast<float>(v));
             });
         }
 
@@ -1762,7 +1863,14 @@ Status Cpu::execute_amo(const DecodedInst& inst) {
     const u64 addr   = read_reg(inst.rs1);
 
     if (addr % size != 0) {
-        return Status::bad(Exception::StoreAMOAddressMisaligned, addr);
+        // The cause depends on what the instruction does. LR is a load and must
+        // report LoadAddressMisaligned; SC and the read-modify-write AMOs both
+        // store, so they report StoreAMOAddressMisaligned. A handler that sees
+        // a store fault for an instruction which performed no store has no way
+        // to make sense of it.
+        return Status::bad(funct5 == 0x02 ? Exception::LoadAddressMisaligned
+                                          : Exception::StoreAMOAddressMisaligned,
+                           addr);
     }
 
     if (funct5 == 0x02) {  // LR

@@ -44,7 +44,10 @@ Uart::Uart(std::ostream& out) : out_(out) {}
 void Uart::attach_host_stdin() {
 #ifdef UART_HOST_CONSOLE
     const int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
-    if (flags >= 0) fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+    if (flags >= 0) {
+        saved_stdin_flags_ = flags;
+        fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+    }
 
     if (isatty(STDIN_FILENO)) {
         auto* saved = new termios{};
@@ -110,6 +113,16 @@ Uart::~Uart() {
         tcsetattr(STDIN_FILENO, TCSANOW, static_cast<termios*>(saved_termios_));
     }
     delete static_cast<termios*>(saved_termios_);
+
+    // The file flags need putting back as much as the terminal settings do, and
+    // for the same reason: O_NONBLOCK is a property of the open file
+    // description, which the shell that launched us shares. Leaving it set
+    // makes that shell's next read of the terminal fail with EAGAIN -
+    // "bash: read error: 0: Resource temporarily unavailable" - long after the
+    // emulator has exited.
+    if (saved_stdin_flags_ >= 0) {
+        fcntl(STDIN_FILENO, F_SETFL, saved_stdin_flags_);
+    }
 #endif
 }
 

@@ -122,6 +122,20 @@ void test_fdt_carries_the_command_line_and_initrd() {
     CHECK(contains_string(blob, "linux,initrd-start"));
     CHECK(contains_string(blob, "linux,initrd-end"));
 
+    // 64-bit, not 32. With more than 4 GiB of guest RAM the initramfs lands
+    // above the 4 GiB line, and a 32-bit property truncates it to an address
+    // below DRAM_BASE with no memory behind it.
+    const std::vector<u8> high =
+        Fdt::build(8ull * 1024 * 1024 * 1024, "", 0x1'7c00'0000ull, 0x1'7c10'0000ull);
+    bool found_start = false;
+    for (std::size_t i = 0; i + 8 <= high.size(); i += 4) {
+        if (be32_at(high, i) == 1 && be32_at(high, i + 4) == 0x7c00'0000) {
+            found_start = true;
+            break;
+        }
+    }
+    CHECK(found_start);
+
     // With no initrd the properties are absent rather than zero: a kernel reads
     // "present" as "there is one", so a zero-length one would be worse than
     // none at all.
@@ -239,6 +253,47 @@ void test_sbi_set_timer_writes_mtimecmp_and_clears_the_pending_interrupt() {
     CHECK((rig.m.cpu->csrs.read(csr::MIP) & csr::MIP_MTIP) == 0);
 }
 
+void test_sbi_set_timer_expiry_reaches_the_supervisor() {
+    // mtimecmp's expiry naturally raises MTIP - a *machine* timer interrupt.
+    // A supervisor cannot enable that: mie is machine-only, and under --linux
+    // there is no M-mode software to enable it on the kernel's behalf. So
+    // without forwarding, the deadline expires into nothing, jiffies never
+    // advance, and every sleep in the kernel hangs forever - a failure that
+    // looks exactly like the emulator being slow rather than being wrong.
+    //
+    // Real firmware handles the machine timer interrupt and posts a supervisor
+    // one in its place. This checks that it happens.
+    SbiRig rig({ECALL});
+    rig.call(sbi::EXT_TIME, 0, 5);
+
+    rig.clint.update(rig.m.cpu->csrs);
+    CHECK((rig.m.cpu->csrs.read(csr::MIP) & csr::MIP_STIP) == 0);
+
+    for (int i = 0; i < 10; ++i) rig.clint.tick();
+    rig.clint.update(rig.m.cpu->csrs);
+    CHECK((rig.m.cpu->csrs.read(csr::MIP) & csr::MIP_STIP) != 0);
+}
+
+void test_the_timer_divisor_slows_the_clock_rather_than_speeding_it_up() {
+    // "--timer-divisor N: instructions per mtime tick". This used to *add* N
+    // per instruction, the exact inverse - so asking for a slower clock gave an
+    // interrupt storm instead.
+    Clint clint;
+    clint.instructions_per_tick = 10;
+    for (int i = 0; i < 9; ++i) clint.tick();
+    CHECK_EQ_U(clint.mtime(), 0);
+    clint.tick();
+    CHECK_EQ_U(clint.mtime(), 1);
+    for (int i = 0; i < 30; ++i) clint.tick();
+    CHECK_EQ_U(clint.mtime(), 4);
+
+    // The default advances once per instruction, which is what makes a run
+    // reproducible: the timer fires at the same instruction every time.
+    Clint fast;
+    for (int i = 0; i < 5; ++i) fast.tick();
+    CHECK_EQ_U(fast.mtime(), 5);
+}
+
 void test_sbi_legacy_set_timer_returns_no_error_code() {
     // The v0.1 form returns nothing at all - not even success - so a0 must be
     // left exactly as the caller set it. Writing a return code into it would
@@ -319,6 +374,8 @@ int main() {
     test_sbi_is_off_by_default();
     test_sbi_base_extension_reports_what_exists();
     test_sbi_set_timer_writes_mtimecmp_and_clears_the_pending_interrupt();
+    test_sbi_set_timer_expiry_reaches_the_supervisor();
+    test_the_timer_divisor_slows_the_clock_rather_than_speeding_it_up();
     test_sbi_legacy_set_timer_returns_no_error_code();
     test_sbi_console_putchar_reaches_the_host();
     test_sbi_console_getchar_drains_the_uart();

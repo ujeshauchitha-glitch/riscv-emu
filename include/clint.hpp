@@ -40,7 +40,21 @@ public:
     Status      store(u64 offset, unsigned size_bytes, u64 value) override;
 
     // Advance the timer. Called once per retired instruction.
-    void tick() { mtime_ += ticks_per_instruction; }
+    // One mtime tick every `instructions_per_tick` instructions.
+    //
+    // This used to add `ticks_per_instruction` per instruction, which is the
+    // inverse of what the option is documented to do: passing
+    // `--timer-divisor 100` to slow the clock down advanced mtime a hundred
+    // ticks per instruction instead, so a guest that armed a deadline N ticks
+    // ahead was interrupted a hundred times sooner. Asking for slower ticks
+    // produced an interrupt storm.
+    void tick() {
+        if (instructions_per_tick <= 1) { ++mtime_; return; }
+        if (++subtick_ >= instructions_per_tick) {
+            subtick_ = 0;
+            ++mtime_;
+        }
+    }
 
     // Drive MTIP and MSIP in mip to match the device's state. Interrupt pending
     // bits are owned by the device, not by software: a guest cannot clear MTIP
@@ -60,14 +74,37 @@ public:
     // immediately and never makes progress.
     void set_timer(u64 deadline, CsrFile& csrs) {
         mtimecmp_ = deadline;
+
+        // Both pending bits, because from here on this deadline belongs to the
+        // supervisor - see `sbi_timer_` below.
         csrs.clear_interrupt(csr::MIP_MTIP);
+        csrs.clear_interrupt(csr::MIP_STIP);
+        sbi_timer_ = true;
     }
 
     // How fast the clock runs relative to instruction retirement. Larger values
     // make each timer tick cover more instructions.
-    u64 ticks_per_instruction = 1;
+    // How many retired instructions make one mtime tick. 1 - the default -
+    // means the timer advances once per instruction, which is what makes a run
+    // reproducible: the timer fires at the same instruction every time.
+    u64 instructions_per_tick = 1;
 
 private:
+    // Has a supervisor armed this timer through SBI?
+    //
+    // mtimecmp is a machine-mode register, so its expiry naturally raises
+    // MTIP - a *machine* timer interrupt. A supervisor cannot enable that: mie
+    // is machine-only, and under --linux there is no M-mode software to enable
+    // it on the kernel's behalf. So without this the deadline expires into
+    // nothing, jiffies never advance, and every sleep in the kernel hangs
+    // forever - a failure that looks exactly like the emulator being slow.
+    //
+    // Real firmware handles the machine timer interrupt and posts a supervisor
+    // one in its place. That is what this flag models: once the timer has been
+    // armed through SBI, its expiry is delivered as STIP.
+    bool sbi_timer_ = false;
+
+    u64 subtick_  = 0;   // instructions since the last mtime tick
     u64 mtime_    = 0;
     // Reset value 0 means the timer is already "expired", so MTIP asserts
     // immediately - which is exactly what real hardware does, and why every
