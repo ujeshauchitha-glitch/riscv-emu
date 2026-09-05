@@ -29,6 +29,14 @@ struct LoadedImage {
     bool        ok = false;
     u64         entry = 0;
     std::string error;
+
+    // Address of the `tohost` symbol, or 0 if the image has none.
+    //
+    // This is the HTIF convention the riscv-tests suite uses to report its
+    // result: the test writes a non-zero value there and spins. Finding it by
+    // name in the symbol table means the emulator does not need the address
+    // hard-coded or passed in.
+    u64 tohost = 0;
 };
 
 // Load an ELF64 RISC-V image into the bus. `is_elf` can be checked first to
