@@ -226,10 +226,43 @@ int main(int argc, char** argv) {
             }
             entry = img.entry;
             tohost = img.tohost;
-        } else if (!dram->load_image(DRAM_BASE, bytes)) {
-            std::cerr << "error: image (" << bytes.size() << " bytes) does not fit in "
-                      << dram_size_mb << " MiB of DRAM\n";
-            return 1;
+        } else {
+            // A flat binary normally goes at the start of DRAM. A Linux kernel
+            // Image is the exception: it carries a header saying where it wants
+            // to be.
+            //
+            //   offset 0x00  code0, code1   a jump, so the header is executable
+            //   offset 0x08  text_offset    where to load it, relative to the
+            //                               2 MiB-aligned start of memory
+            //   offset 0x38  magic2         "RSC\x05"
+            //
+            // text_offset is 2 MiB on RV64, because that is where firmware
+            // conventionally ends. Loading the kernel at the start of DRAM
+            // instead puts every symbol 2 MiB away from where it was linked,
+            // and it dies immediately on its first absolute reference.
+            u64 load_at = DRAM_BASE;
+            if (bytes.size() >= 0x40) {
+                u32 magic2 = 0;
+                for (int b = 0; b < 4; ++b) {
+                    magic2 |= static_cast<u32>(bytes[0x38 + b]) << (8 * b);
+                }
+                if (magic2 == 0x0543'5352) {   // "RSC\x05"
+                    u64 text_offset = 0;
+                    for (int b = 0; b < 8; ++b) {
+                        text_offset |= static_cast<u64>(bytes[8 + b]) << (8 * b);
+                    }
+                    load_at = DRAM_BASE + text_offset;
+                    entry   = load_at;
+                    std::cerr << "linux kernel image, text_offset 0x" << std::hex
+                              << text_offset << " -> loading at 0x" << load_at
+                              << std::dec << "\n";
+                }
+            }
+            if (!dram->load_image(load_at, bytes)) {
+                std::cerr << "error: image (" << bytes.size() << " bytes) does not fit in "
+                          << dram_size_mb << " MiB of DRAM\n";
+                return 1;
+            }
         }
     }
 
