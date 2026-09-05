@@ -366,10 +366,23 @@ void test_accessed_and_dirty_bits_are_set() {
     CHECK((after_load.value & pte::A) != 0);   // accessed
     CHECK((after_load.value & pte::D) == 0);   // but not dirty: it was a read
 
-    m.cpu->mmu.flush();
+    // Deliberately *not* flushed in between.
+    //
+    // The read above filled the TLB, so the store below is a TLB hit and never
+    // walks the table again. An implementation that only sets D during the walk
+    // leaves this page clean forever - and a kernel scanning for dirty pages
+    // then treats modified pages as clean and drops the writes. This test used
+    // to flush here, which meant it only ever exercised the walk and could not
+    // have caught that.
     m.cpu->mmu.translate(va, AccessType::Store, PRIV_SUPERVISOR, m.cpu->csrs);
     auto after_store = m.bus.load(leaf_addr, 8, AccessType::Load);
     CHECK((after_store.value & pte::D) != 0);
+
+    // And once set, it stays set on a subsequent read - D is sticky until
+    // software clears it, which is the whole basis of dirty-page tracking.
+    m.cpu->mmu.translate(va, AccessType::Load, PRIV_SUPERVISOR, m.cpu->csrs);
+    auto after_reread = m.bus.load(leaf_addr, 8, AccessType::Load);
+    CHECK((after_reread.value & pte::D) != 0);
 }
 
 void test_non_canonical_address_faults() {
@@ -445,6 +458,94 @@ void test_misa_advertises_s_and_u() {
     CHECK((misa & (1ull << ('U' - 'A'))) != 0);
 }
 
+void test_an_access_crossing_a_page_boundary_translates_both_pages() {
+    // Translation is per page, so a misaligned access whose bytes fall in two
+    // pages needs two translations. Translating only the starting address and
+    // then reading eight contiguous *physical* bytes walks off the end of the
+    // first page's frame into whatever follows it - with no fault and no
+    // permission check. RISC-V allows misaligned accesses, so ordinary guest
+    // code reaches this.
+    Machine m({});
+    const u64 root = DRAM_BASE + 0x10000;
+    const u64 va_a = 0x100000, pa_a = DRAM_BASE + 0x20000;
+    const u64 va_b = 0x101000, pa_b = DRAM_BASE + 0x40000;
+
+    u64 satp = map_page(m, root, va_a, pa_a, pte::R | pte::W);
+    map_page(m, root, va_b, pa_b, pte::R | pte::W);
+    m.cpu->csrs.write(csr::SATP, satp);
+    m.cpu->priv = PRIV_SUPERVISOR;
+    m.cpu->mmu.flush();
+
+    // Two distinguishable pages, and a third pattern in the physical memory
+    // that *follows* the first page - which is what a single translation would
+    // wrongly return.
+    CHECK(m.bus.store(pa_a + 0xffc, 4, 0xaaaaaaaa));
+    CHECK(m.bus.store(pa_b, 4, 0xbbbbbbbb));
+    CHECK(m.bus.store(pa_a + 0x1000, 4, 0xcccccccc));
+
+    auto r = m.cpu->mem_load(va_a + 0xffc, 8, AccessType::Load);
+    CHECK(r);
+    CHECK_EQ_U(r.value, 0xbbbbbbbb'aaaaaaaaull);
+
+    // And a store lands in both pages rather than running past the first.
+    CHECK(m.cpu->mem_store(va_a + 0xffc, 8, 0x11111111'22222222ull));
+    auto first  = m.bus.load(pa_a + 0xffc, 4, AccessType::Load);
+    auto second = m.bus.load(pa_b, 4, AccessType::Load);
+    CHECK(first);
+    CHECK(second);
+    CHECK_EQ_U(first.value, 0x22222222);
+    CHECK_EQ_U(second.value, 0x11111111);
+    // The memory after the first page is untouched.
+    auto beyond = m.bus.load(pa_a + 0x1000, 4, AccessType::Load);
+    CHECK(beyond);
+    CHECK_EQ_U(beyond.value, 0xcccccccc);
+}
+
+void test_a_crossing_access_faults_when_the_second_page_is_unmapped() {
+    // The failure that matters: without a second translation there is no fault
+    // at all, and the guest silently reads memory it was never given.
+    Machine m({});
+    const u64 root = DRAM_BASE + 0x10000;
+    const u64 va   = 0x100000, pa = DRAM_BASE + 0x20000;
+
+    m.cpu->csrs.write(csr::SATP, map_page(m, root, va, pa, pte::R | pte::W));
+    m.cpu->priv = PRIV_SUPERVISOR;
+    m.cpu->mmu.flush();
+
+    auto r = m.cpu->mem_load(va + 0xffc, 8, AccessType::Load);
+    CHECK(!r);
+    CHECK(r.trap.cause == Exception::LoadPageFault);
+
+    const Status st = m.cpu->mem_store(va + 0xffc, 8, 0);
+    CHECK(!st);
+    CHECK(st.trap.cause == Exception::StoreAMOPageFault);
+}
+
+void test_a_delegated_interrupt_does_not_fire_in_machine_mode() {
+    // Trap entry into machine mode clears MIE but leaves SIE alone, so a hart
+    // that trapped out of supervisor mode sits in M-mode with SIE still set.
+    // Testing sstatus.SIE without also checking the current mode then lets a
+    // delegated interrupt fire while running in machine mode - and enter_trap,
+    // seeing priv > S, delivers a supervisor-cause interrupt to mtvec. With
+    // mtvec zero, as under xv6 or --linux, that vectors to address 0.
+    Machine m({});
+    m.cpu->priv = PRIV_MACHINE;
+    m.cpu->csrs.write(csr::MSTATUS,
+                      (m.cpu->csrs.mstatus() & ~csr::MSTATUS_MIE) | csr::MSTATUS_SIE);
+    m.cpu->csrs.write(csr::MIDELEG, 1ull << 5);        // delegate the S timer
+    m.cpu->csrs.write(csr::MIE, csr::MIP_STIP);
+    m.cpu->csrs.raise_interrupt(csr::MIP_STIP);
+
+    Interrupt intr;
+    CHECK(!m.cpu->next_interrupt(intr));
+
+    // In supervisor mode, with the same state, it does fire - so the guard is
+    // not simply disabling the interrupt.
+    m.cpu->priv = PRIV_SUPERVISOR;
+    CHECK(m.cpu->next_interrupt(intr));
+    CHECK(intr == Interrupt::SupervisorTimer);
+}
+
 }  // namespace
 
 int main() {
@@ -467,6 +568,9 @@ int main() {
     test_sum_controls_supervisor_access_to_user_pages();
     test_mxr_makes_execute_only_pages_readable();
     test_accessed_and_dirty_bits_are_set();
+    test_an_access_crossing_a_page_boundary_translates_both_pages();
+    test_a_crossing_access_faults_when_the_second_page_is_unmapped();
+    test_a_delegated_interrupt_does_not_fire_in_machine_mode();
     test_non_canonical_address_faults();
     test_reserved_write_only_encoding_faults();
     test_tlb_caches_and_sfence_flushes();

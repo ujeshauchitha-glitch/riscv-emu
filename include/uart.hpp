@@ -130,5 +130,10 @@ private:
     bool  escape_armed_  = false;   // the last byte read was the Ctrl-A prefix
     bool  exit_requested_ = false;
     bool  restore_termios_ = false;
+
+    // O_NONBLOCK lives on the open file *description*, which is shared with the
+    // shell that launched us - so leaving it set outlives the process and makes
+    // the shell's next read return EAGAIN. The original flags are saved here.
+    int   saved_stdin_flags_ = -1;
     void* saved_termios_ = nullptr;  // struct termios, hidden to keep the header clean
 };

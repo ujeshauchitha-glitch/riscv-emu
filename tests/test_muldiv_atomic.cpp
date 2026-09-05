@@ -341,6 +341,30 @@ void test_trap_between_lr_and_sc_breaks_the_reservation() {
     CHECK(sc_result_with_middle_instruction(ecall) != 0);      // trap breaks it
 }
 
+void test_a_misaligned_lr_reports_a_load_fault() {
+    // LR is a load and must report LoadAddressMisaligned; SC and the
+    // read-modify-write AMOs store, so they report StoreAMOAddressMisaligned.
+    // A handler that sees a store fault for an instruction which performed no
+    // store has no way to make sense of it.
+    Machine m({amo(0x02, 1, 2, 0, false)});   // lr.d x1, (x2)
+    m.cpu->regs[2] = DRAM_BASE + 4;
+    const Status lr = m.cpu->step();
+    CHECK(!lr);
+    CHECK(lr.trap.cause == Exception::LoadAddressMisaligned);
+
+    Machine m2({amo(0x03, 1, 2, 3, false)});  // sc.d x1, x3, (x2)
+    m2.cpu->regs[2] = DRAM_BASE + 4;
+    const Status sc = m2.cpu->step();
+    CHECK(!sc);
+    CHECK(sc.trap.cause == Exception::StoreAMOAddressMisaligned);
+
+    Machine m3({amo(0x00, 1, 2, 3, false)});  // amoadd.d x1, x3, (x2)
+    m3.cpu->regs[2] = DRAM_BASE + 4;
+    const Status amo = m3.cpu->step();
+    CHECK(!amo);
+    CHECK(amo.trap.cause == Exception::StoreAMOAddressMisaligned);
+}
+
 }  // namespace
 
 int main() {
@@ -360,5 +384,6 @@ int main() {
     test_sc_to_a_different_address_fails();
     test_second_sc_fails_because_the_reservation_is_consumed();
     test_trap_between_lr_and_sc_breaks_the_reservation();
+    test_a_misaligned_lr_reports_a_load_fault();
     return testutil::summary("muldiv_atomic");
 }

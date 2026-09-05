@@ -73,6 +73,23 @@ Result<u64> Mmu::translate(u64 vaddr, AccessType type, u32 priv, CsrFile& csrs) 
         if (!permitted(it->second.perms, type, priv, csrs)) {
             return Result<u64>::bad(page_fault_for(type), vaddr);
         }
+
+        // A hit still has to set the dirty bit.
+        //
+        // This is easy to miss, because the walk sets A and D and a hit skips
+        // the walk entirely - so a page that is *read* first, filling the TLB,
+        // and written afterwards would keep D = 0 forever. A kernel scanning
+        // page tables for dirty pages (writeback, swap, msync) would then treat
+        // modified pages as clean and drop the writes, which is data loss with
+        // no error anywhere.
+        //
+        // Remembering the PTE's address in the entry is what makes this
+        // possible without re-walking.
+        if (type == AccessType::Store && (it->second.perms & pte::D) == 0) {
+            it->second.perms |= pte::D;
+            bus_.store(it->second.pte_addr, 8, it->second.perms);
+        }
+
         ++hits_;
         return Result<u64>::good((it->second.ppn << PAGE_SHIFT) | offset);
     }
@@ -141,13 +158,18 @@ Result<u64> Mmu::translate(u64 vaddr, AccessType type, u32 priv, CsrFile& csrs) 
     // The accessed and dirty bits. The spec allows an implementation either to
     // fault so software can set them, or to set them itself; setting them is
     // simpler and is what most hardware does.
+    const u64 pte_index = (vaddr >> (PAGE_SHIFT + 9 * level)) & 0x1ff;
+    const u64 pte_addr  = table + pte_index * 8;
+
     u64 updated = entry | pte::A;
     if (type == AccessType::Store) updated |= pte::D;
     if (updated != entry) {
-        const u64 index = (vaddr >> (PAGE_SHIFT + 9 * level)) & 0x1ff;
-        bus_.store(table + index * 8, 8, updated);
+        bus_.store(pte_addr, 8, updated);
     }
 
-    tlb_[key] = Entry{ppn, entry};
+    // Cache the *updated* permissions, not the ones read from memory: the
+    // entry's D bit is what the hit path above tests, so caching the stale
+    // value would make it write the PTE again on every store.
+    tlb_[key] = Entry{ppn, updated, pte_addr};
     return Result<u64>::good((ppn << PAGE_SHIFT) | offset);
 }

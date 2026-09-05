@@ -102,14 +102,20 @@ Result<u64> Plic::load(u64 offset, unsigned size_bytes) {
     if (offset < PRIORITY_BASE + MAX_IRQS * 4) {
         return Result<u64>::good(priority_[offset / 4]);
     }
+    // The bitmaps are 64 bits wide, so only words 0 and 1 exist. Shifting a
+    // u64 by 64 or more is undefined behaviour, and on x86 the shift count is
+    // taken modulo 64 - so word 2 would quietly alias word 0 and report
+    // interrupts that are not there. The store path already guards this; the
+    // load path did not.
     if (offset >= PENDING_BASE && offset < PENDING_BASE + 0x80) {
         const u64 word = (offset - PENDING_BASE) / 4;
+        if (word >= 2) return Result<u64>::good(0);
         return Result<u64>::good(static_cast<u32>(pending_ >> (word * 32)));
     }
     if (offset >= ENABLE_BASE && offset < CONTEXT_BASE) {
         const u64 ctx = (offset - ENABLE_BASE) / 0x80;
         const u64 word = ((offset - ENABLE_BASE) % 0x80) / 4;
-        if (ctx >= NUM_CONTEXTS) return Result<u64>::good(0);
+        if (ctx >= NUM_CONTEXTS || word >= 2) return Result<u64>::good(0);
         return Result<u64>::good(static_cast<u32>(contexts_[ctx].enabled >> (word * 32)));
     }
     if (offset >= CONTEXT_BASE) {

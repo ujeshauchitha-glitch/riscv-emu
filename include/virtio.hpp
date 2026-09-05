@@ -75,7 +75,11 @@ private:
 
     // Device registers.
     u32 status_          = 0;
-    u32 driver_features_ = 0;
+    // The feature space is 64 bits, read and written 32 at a time through a
+    // pair of select registers.
+    u64 driver_features_     = 0;
+    u32 device_features_sel_ = 0;
+    u32 driver_features_sel_ = 0;
     u32 queue_sel_       = 0;
     u32 queue_num_       = 0;
     u32 queue_ready_     = 0;

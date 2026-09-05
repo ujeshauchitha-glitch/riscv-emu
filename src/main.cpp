@@ -184,7 +184,7 @@ int main(int argc, char** argv) {
         std::cerr << "error: failed to build the machine's address map\n";
         return 1;
     }
-    clint->ticks_per_instruction = 1;
+    clint->instructions_per_tick = 1;
 
     // The block device is a bus master - it reads and writes guest memory
     // itself - and raises its interrupt through the PLIC.
@@ -342,6 +342,37 @@ int main(int argc, char** argv) {
         cpu.write_reg(11, dtb_addr);   // a1 = device tree
         cpu.sbi_enabled = true;
 
+        // Delegate every trap to supervisor mode.
+        //
+        // This is firmware's job, and there is no firmware here to do it. A
+        // trap taken in S-mode goes to M-mode unless the matching medeleg bit
+        // is set - so without this, the kernel's very first page fault (the
+        // fetch immediately after it enables paging, which is *designed* to
+        // fault so that execution lands on the virtual-address continuation at
+        // stvec) is delivered to mtvec instead. mtvec is zero, so the machine
+        // vectors to address 0, faults on that fetch too, and loops forever
+        // with nothing on the console.
+        //
+        // OpenSBI writes exactly this before its own mret into the kernel.
+        cpu.csrs.write(csr::MEDELEG, 0xffff);
+        cpu.csrs.write(csr::MIDELEG, 0xffff);
+
+        // Let the supervisor see its own timer and external interrupts. mie is
+        // machine-only, so a kernel cannot enable these for itself - firmware
+        // does it on the way in.
+        cpu.csrs.write(csr::MIE, csr::MIP_SEIP | csr::MIP_STIP | csr::MIP_SSIP);
+
+        // Let supervisor and user code read the counters.
+        //
+        // `rdtime` is an ordinary instruction to a kernel - Linux's udelay() is
+        // built on it - but reading the time CSR from a lower privilege level
+        // is illegal unless the level above has enabled it. Nothing here has,
+        // so udelay traps on its first instruction and the kernel spins in its
+        // own illegal-instruction handler. Firmware enables them on the way in;
+        // this does the same.
+        cpu.csrs.write(csr::MCOUNTEREN, 0xffffffff);
+        cpu.csrs.write(csr::SCOUNTEREN, 0xffffffff);
+
         // Linux installs stvec early but not instantly, and it delegates
         // nothing to itself - so the "no handler installed" guard, which is a
         // debugging aid rather than architectural behaviour, would fire on the
@@ -356,7 +387,7 @@ int main(int argc, char** argv) {
     // The console becomes bidirectional here. Everything before this point
     // could print; from now on a guest shell can also be typed at.
     uart->attach_host_stdin();
-    clint->ticks_per_instruction = timer_divisor;
+    clint->instructions_per_tick = timer_divisor;
 
     u64    retired = 0;
     Status st      = cpu.run(max_steps, &retired);
