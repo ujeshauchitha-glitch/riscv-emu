@@ -318,6 +318,16 @@ Status Cpu::run(u64 max_steps, u64* steps_out) {
             return Status::good();
         }
 
+        // So has a user who pressed Ctrl-A X at the console. The guest is not
+        // consulted: this is the human at the keyboard asking to leave, which
+        // is the one request a running guest must not be able to refuse.
+        if (uart && uart->exit_requested()) {
+            halted = true;
+            user_quit = true;
+            if (steps_out) *steps_out = n + 1;
+            return Status::good();
+        }
+
         // The riscv-tests suite stops by writing its result to `tohost` and
         // then spinning, so there is nothing to notice except the write itself.
         if (htif_tohost_addr != 0) {

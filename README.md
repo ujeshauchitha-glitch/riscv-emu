@@ -68,6 +68,20 @@ loudly at the exact instruction.
 
 ## Quick start
 
+**Boot xv6 and get a shell:**
+
+```bash
+./scripts/boot-xv6.sh
+```
+
+Fetches xv6, builds it for the extensions this emulator implements, builds the
+emulator, and boots it. About half a minute later you get a live `$` prompt —
+try `ls`, `cat README`, `usertests`. Press **Ctrl-A then X** to leave (Ctrl-C
+goes to the guest). Needs a RISC-V toolchain: `apt-get install
+gcc-riscv64-unknown-elf`.
+
+**Build and test everything:**
+
 ```bash
 ./run-all.sh
 ```
@@ -96,8 +110,8 @@ cmake --build build
 # The format is detected from the file's magic number.
 ./build/riscv_emu path/to/kernel.elf
 
-# Boot xv6 (build it first - see docs/RUNNING.md section 7)
-./build/riscv_emu --disk fs.img --max-steps 100000000000 kernel/kernel
+# Boot xv6 by hand (scripts/boot-xv6.sh does all of this for you)
+./build/riscv_emu --disk fs.img --max-steps 1000000000000 kernel/kernel
 
 # The bare-metal self-tests (built when a RISC-V toolchain is installed).
 # Each stops on ebreak with one bit set in a0 per passing check.

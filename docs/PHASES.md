@@ -272,7 +272,8 @@ trap entry clobbering `t0` before the handler could read it.
 ## Phase 7: PLIC + virtio-blk — xv6 boots — done
 
 **The milestone.** xv6 boots to a shell prompt, the prompt can be typed at, and
-`ls` and `cat` read real data off a virtio disk image.
+`ls` and `cat` read real data off a virtio disk image. `scripts/boot-xv6.sh`
+does the whole thing — fetch, build, verify, boot — in one command.
 
 ```
 xv6 kernel is booting
