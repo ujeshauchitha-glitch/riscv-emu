@@ -30,12 +30,13 @@ Every [`riscv-tests`](https://github.com/riscv-software-src/riscv-tests) case
 the emulator can build passes:
 
 ```
-rv64ui 54/54   rv64um 13/13   rv64ua 19/19   rv64mi 11/11   rv64si 4/4
-101/101 passed
+rv64ui 54/54   rv64um 13/13   rv64ua 19/19   rv64mi 11/11   rv64si 4/4   rv64uc 1/1
+102/102 passed
 ```
 
-**Phases 0-7 done, two to go.** Next: the compressed and floating-point
-extensions, a device tree and SBI - and then Linux.
+**Phases 0-8 in progress.** The C (compressed) extension has landed, so
+**stock, unmodified xv6 boots** - no special build flags. Next in phase 8: the
+floating-point extensions, a device tree and SBI - and then Linux.
 
 [`docs/07-booting-xv6.md`](docs/07-booting-xv6.md) explains how the boot works
 and the two bugs that stood between "runs a kernel" and "boots xv6".
@@ -57,9 +58,9 @@ and the two bugs that stood between "runs a kernel" and "boots xv6".
 | **Sv39 virtual memory**, TLB | ✅ complete |
 | **Devices** — PLIC, virtio-blk | ✅ complete |
 | **Interactive console** — host stdin as the UART's receive line | ✅ complete |
-| **Boots xv6-riscv to a shell** | ✅ |
+| **Boots stock xv6-riscv to a shell**, `usertests` passes in full | ✅ |
 | PMP — registers stored, *not enforced* | ⚠️ partial |
-| C — compressed instructions | ⬜ phase 8 |
+| **C** — compressed instructions | ✅ complete |
 | F/D — floating point | ⬜ phase 8 |
 
 Instructions that are not implemented yet raise an illegal-instruction trap
@@ -74,8 +75,7 @@ loudly at the exact instruction.
 ./scripts/boot-xv6.sh
 ```
 
-Fetches xv6, builds it for the extensions this emulator implements, builds the
-emulator, and boots it. About half a minute later you get a live `$` prompt —
+Fetches xv6, builds it exactly as it ships, builds the emulator, and boots it. About half a minute later you get a live `$` prompt —
 try `ls`, `cat README`, `usertests`. Press **Ctrl-A then X** to leave (Ctrl-C
 goes to the guest). Needs a RISC-V toolchain: `apt-get install
 gcc-riscv64-unknown-elf`.
@@ -86,7 +86,7 @@ gcc-riscv64-unknown-elf`.
 ./run-all.sh
 ```
 
-Builds the project, runs all thirteen test suites, then runs the demo and every
+Builds the project, runs all fourteen test suites, then runs the demo and every
 self-test and reports what each produced. Use `--quick` to skip the clean
 rebuild.
 
@@ -131,10 +131,10 @@ read a trace or a stop message when something goes wrong.
 cd build && ctest --output-on-failure
 ```
 
-Thirteen suites: unit tests for the decoder, the bus, the CPU, the RV64I
+Fourteen suites: unit tests for the decoder, the bus, the CPU, the RV64I
 instruction set, the CSR/trap machinery, the M/A extensions, the devices,
-supervisor mode with the MMU, and the PLIC and virtio block device, plus four
-bare-metal self-tests
+supervisor mode with the MMU, the PLIC and virtio block device, and the
+compressed-instruction decoder, plus four bare-metal self-tests
 assembled with a real RISC-V toolchain. The self-tests are skipped automatically
 when no toolchain is present - to enable them:
 

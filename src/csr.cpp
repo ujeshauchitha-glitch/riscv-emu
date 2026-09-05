@@ -29,12 +29,12 @@ constexpr u64 MSTATUS_MASK =
 }  // namespace
 
 CsrFile::CsrFile() {
-    // misa advertises the ISA. C and F/D join in phase 8. Guest code reads this
+    // misa advertises the ISA. F/D join later in phase 8. Guest code reads this
     // to decide what it may use, so it must not claim more than we deliver.
     // 'S' and 'U' announce that supervisor and user mode exist. A kernel checks
     // misa before trying to drop privilege.
     raw_[csr::MISA] = MISA_MXL_64 | misa_ext('I') | misa_ext('M') | misa_ext('A') |
-                      misa_ext('S') | misa_ext('U');
+                      misa_ext('C') | misa_ext('S') | misa_ext('U');
 
     // A single hart, numbered 0. Every RISC-V system must have a hart 0, and
     // kernels use mhartid to pick which core runs the boot path.
@@ -198,7 +198,7 @@ void CsrFile::write(u32 addr, u64 value) {
         }
 
         case csr::SEPC:
-            raw_[a] = value & ~3ull;   // as mepc: an instruction address
+            raw_[a] = value & ~1ull;   // as mepc: an instruction address
             return;
 
         case csr::STVEC: {
@@ -210,10 +210,17 @@ void CsrFile::write(u32 addr, u64 value) {
 
         case csr::MEPC:
             // mepc always holds an instruction address, so its low bit is
-            // hardwired to zero - and because we only support 32-bit-aligned
-            // instructions (no C extension yet), bit 1 is too. Phase 8 relaxes
-            // this to just bit 0 when compressed instructions arrive.
-            raw_[a] = value & ~3ull;
+            // hardwired to zero. Bit 1 is *not*: with the C extension IALIGN is
+            // 16, and instructions legitimately live at 2-byte-aligned
+            // addresses. Masking it too - which is correct only when IALIGN is
+            // 32 - silently rounds a return address down by two bytes.
+            //
+            // xv6 compiled for rv64gc is the case that exposes this: its `main`
+            // happens to land at 0x8000_0dee, `start()` writes that to mepc, and
+            // the mret returns into the middle of whatever the linker placed
+            // just before it. The kernel then runs a function epilogue it never
+            // called and returns to a machine-mode address in supervisor mode.
+            raw_[a] = value & ~1ull;
             return;
 
         case csr::CYCLE:

@@ -19,7 +19,7 @@ modes. Linux additionally needs the C and F/D extensions, a device tree, and SBI
 | 5 | riscv-tests + CI | ✅ done |
 | 6 | S-mode + Sv39 MMU | ✅ done |
 | 7 | PLIC + virtio-blk — **boot xv6** | ✅ done |
-| 8 | Linux prerequisites (C, F/D, DTB, SBI) | ⬜ next |
+| 8 | Linux prerequisites (C, F/D, DTB, SBI) | 🔨 in progress |
 | 9 | **Boot Linux** | ⬜ |
 
 The first three phases were numbered before the roadmap existed. Phase 0 is
@@ -334,3 +334,55 @@ bounds.
 not enough to isolate.
 
 **Docs:** [`07-booting-xv6.md`](07-booting-xv6.md)
+
+## Phase 8: Linux prerequisites — in progress
+
+### Part 1: the C (compressed) extension — done
+
+**Stock, unmodified xv6 now boots.** Phase 7 could only run it after patching
+its Makefile off `-march=rv64gc`; the emulator now runs the 5,253 compressed
+instructions in its stock kernel directly. `scripts/boot-xv6.sh` no longer
+patches anything.
+
+**Approach:** every compressed instruction is *defined by the spec* as being
+equivalent to exactly one 32-bit base instruction, so the extension is
+implemented as a translation - `u32 decompress(u16)` - with the existing decoder
+and every execute path untouched. A parallel 16-bit execute path would have been
+a second implementation of instructions that already work, and every bug fixed
+in one would have to be found again in the other.
+
+**Where it reaches the CPU:** three places, and no more. Fetch reads a halfword
+first, because instruction length is not known until the low two bits have been
+read - and because a 32-bit instruction may straddle a page boundary, which is
+only reported correctly if each halfword gets its own translation. The PC
+advances by `inst.length`. And IALIGN drops from 32 to 16, which incidentally
+makes a misaligned jump impossible to express at all: JAL and the branches have
+bit 0 of their immediate hardwired to zero, and JALR clears it.
+
+**Two bugs, neither caught by the new unit tests** - both in code around the
+decompressor that had quietly assumed every instruction is four bytes:
+
+- `riscv-tests` `rv64uc/rvc` check 36 caught JALR linking `pc + 4`. `C.JALR` is
+  two bytes and must link `pc + 2`; a compiler calling through it would get a
+  return address one instruction too far and skip whatever followed the call.
+- Booting stock xv6 caught `mepc` masking bit 1 as well as bit 0. `main` lands
+  at `0x8000_0dee` - 2-byte aligned, ordinary with C - and `mret` returned two
+  bytes early into the tail of the function before it. The comment above that
+  mask *said* it was assuming no C extension and *named* phase 8 as the phase
+  that would invalidate it. It still broke: a note in a comment is not a
+  mechanism.
+
+**Tests:** `tests/test_compressed.cpp`, 101 checks - including 57 rows of
+encodings produced by the real GNU assembler, each pairing a compressed
+instruction with the assembler's encoding of its documented expansion, with
+immediates at both extremes of every field's range. Plus the official `rv64uc`
+suite in the runner: **102/102 riscv-tests pass**.
+
+**Docs:** [`08-compressed-instructions.md`](08-compressed-instructions.md)
+
+### Still to do
+
+- **F and D** - floating point. `C.FLD`/`C.FSD`/`C.FLDSP`/`C.FSDSP` are
+  deliberately left illegal until the registers they address exist.
+- **A device tree**, which Linux needs to discover the machine.
+- **SBI**, the supervisor-mode interface a Linux kernel calls into.

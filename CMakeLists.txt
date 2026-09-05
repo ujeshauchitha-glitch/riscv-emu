@@ -62,6 +62,7 @@ set(RISCV_EMU_TESTS
   test_devices
   test_supervisor
   test_interrupt_devices
+  test_compressed
 )
 
 foreach(test_name IN LISTS RISCV_EMU_TESTS)

@@ -120,7 +120,8 @@ fi
 step "Summary"
 
 if [ "$FAILURES" -eq 0 ]; then
-  printf '%s  Everything passed.%s\n\n' "$GREEN$BOLD" "$OFF"
+  printf '%s  Everything passed.%s\n' "$GREEN$BOLD" "$OFF"
+  printf '  To boot a real OS:  %s./scripts/boot-xv6.sh%s\n\n' "$BOLD" "$OFF"
   exit 0
 else
   printf '%s  %d step(s) failed.%s\n\n' "$RED$BOLD" "$FAILURES" "$OFF"

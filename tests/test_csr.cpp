@@ -156,16 +156,18 @@ void test_mtvec_mode_is_warl() {
     CHECK_EQ_U(tvec & csr::MTVEC_MODE_MASK, csr::MTVEC_MODE_DIRECT);
 }
 
-void test_mepc_low_bits_are_hardwired_zero() {
-    // mepc always holds an instruction address. Bit 0 is always zero, and with
-    // only 32-bit instructions (no C extension) bit 1 is too.
+void test_mepc_low_bit_is_hardwired_zero() {
+    // mepc always holds an instruction address, so bit 0 is dropped. Bit 1 is
+    // kept: with the C extension IALIGN is 16 and a 2-byte-aligned address is
+    // a perfectly ordinary place for an instruction to be. See
+    // test_epc_registers_keep_bit_1_with_the_c_extension for why that matters.
     std::vector<u32> p;
     load_imm64(p, 1, 0x8000'1007ull);
     p.push_back(CSRRW(0, csr::MEPC, 1));
 
     Machine m(p);
     m.cpu->run(kLoadImm64Steps + 1, nullptr);
-    CHECK_EQ_U(m.cpu->csrs.read(csr::MEPC), 0x8000'1004ull);
+    CHECK_EQ_U(m.cpu->csrs.read(csr::MEPC), 0x8000'1006ull);
 }
 
 void test_misa_reports_rv64i() {
@@ -174,14 +176,40 @@ void test_misa_reports_rv64i() {
     const u64 misa = m.reg(1);
     // MXL = 2 means RV64, in the top two bits.
     CHECK_EQ_U(misa >> 62, 2);
-    // I, M and A are implemented; C and the floating-point extensions are not,
-    // until phase 8. misa must not claim more than the emulator delivers,
-    // because guest code reads it to decide what it may use.
+    // I, M, A and C are implemented; the floating-point extensions are not yet.
+    // misa must not claim more than the emulator delivers, because guest code
+    // reads it to decide what it may use - and must not claim less, because a
+    // kernel that sees no C bit may refuse to run compressed code it emitted.
     CHECK((misa & (1ull << ('I' - 'A'))) != 0);
     CHECK((misa & (1ull << ('M' - 'A'))) != 0);
     CHECK((misa & (1ull << ('A' - 'A'))) != 0);
-    CHECK((misa & (1ull << ('C' - 'A'))) == 0);
+    CHECK((misa & (1ull << ('C' - 'A'))) != 0);
+    CHECK((misa & (1ull << ('F' - 'A'))) == 0);
     CHECK((misa & (1ull << ('D' - 'A'))) == 0);
+}
+
+void test_epc_registers_keep_bit_1_with_the_c_extension() {
+    // mepc and sepc hold an instruction address, so bit 0 is hardwired to zero.
+    // Bit 1 is *not*, once the C extension is implemented: IALIGN becomes 16
+    // and instructions legitimately live at 2-byte-aligned addresses.
+    //
+    // This is not a corner case. xv6 built for rv64gc puts `main` at
+    // 0x8000_0dee; start() writes that to mepc and returns to it with mret. An
+    // implementation that masks bit 1 as well returns two bytes early, into the
+    // middle of whichever function the linker happened to place before it.
+    CsrFile csrs;
+
+    csrs.write(csr::MEPC, DRAM_BASE + 0xdee);
+    CHECK_EQ_U(csrs.read(csr::MEPC), DRAM_BASE + 0xdee);
+    csrs.write(csr::SEPC, DRAM_BASE + 0xdee);
+    CHECK_EQ_U(csrs.read(csr::SEPC), DRAM_BASE + 0xdee);
+
+    // Bit 0 is still dropped: there is no such thing as an odd instruction
+    // address at any IALIGN.
+    csrs.write(csr::MEPC, DRAM_BASE + 0xdef);
+    CHECK_EQ_U(csrs.read(csr::MEPC), DRAM_BASE + 0xdee);
+    csrs.write(csr::SEPC, DRAM_BASE + 0xdef);
+    CHECK_EQ_U(csrs.read(csr::SEPC), DRAM_BASE + 0xdee);
 }
 
 // --- trap dispatch ----------------------------------------------------------
@@ -397,8 +425,9 @@ int main() {
     test_unimplemented_csr_traps();
     test_mstatus_masks_unimplemented_bits();
     test_mtvec_mode_is_warl();
-    test_mepc_low_bits_are_hardwired_zero();
+    test_mepc_low_bit_is_hardwired_zero();
     test_misa_reports_rv64i();
+    test_epc_registers_keep_bit_1_with_the_c_extension();
     test_ecall_vectors_to_mtvec();
     test_trap_records_cause_epc_and_status();
     test_mret_returns_and_restores();

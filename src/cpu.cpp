@@ -63,20 +63,46 @@ Status Cpu::mem_store(u64 vaddr, unsigned size, u64 value) {
     return bus_.store(pa.value, size, value);
 }
 
-Result<u32> Cpu::fetch() {
-    // Without the C (compressed) extension every instruction is 4 bytes and
-    // must be 4-byte aligned. Phase 8 relaxes this to 2 bytes when C lands.
-    //
-    // In practice a misaligned PC is caught by set_branch_target() on the jump
-    // that produced it, so this is a backstop for a PC set some other way.
-    if ((pc & 0x3) != 0) {
-        return Result<u32>::bad(Exception::InstructionAddressMisaligned, pc);
+// Fetch the instruction at the PC, whatever length it turns out to be.
+//
+// With the C extension, instruction length is not known until the first
+// halfword has been read: bits [1:0] == 11 means 32 bits, anything else means
+// 16. So the fetch happens in two steps.
+//
+// That is not merely a formality. A 32-bit instruction may **straddle a page
+// boundary**, with its first halfword on a mapped page and its second on one
+// that is not - and then the correct behaviour is an instruction page fault
+// reporting the address of the *second* halfword, not of the PC. Reading four
+// bytes in one access would report the wrong address, or, worse, succeed
+// against a page the program was never allowed to execute from. Two accesses
+// give each halfword its own translation, which is what the hardware does.
+Result<DecodedInst> Cpu::fetch_inst() {
+    // IALIGN is 16 bits when C is implemented, so only bit 0 must be clear.
+    // This is a backstop: a misaligned target is normally caught by
+    // set_branch_target() on the jump that produced it, where the reported PC
+    // is the more useful one.
+    if ((pc & 0x1) != 0) {
+        return Result<DecodedInst>::bad(Exception::InstructionAddressMisaligned, pc);
     }
 
-    Result<u64> word = mem_load(pc, 4, AccessType::Instruction);
-    if (!word) return Result<u32>::bad(word.trap);
+    Result<u64> low = mem_load(pc, 2, AccessType::Instruction);
+    if (!low) return Result<DecodedInst>::bad(low.trap);
 
-    return Result<u32>::good(static_cast<u32>(word.value));
+    const u16 low16 = static_cast<u16>(low.value);
+    if (!is_32bit_instruction(low16)) {
+        return Result<DecodedInst>::good(decode16(low16, 0));
+    }
+
+    Result<u64> high = mem_load(pc + 2, 2, AccessType::Instruction);
+    if (!high) return Result<DecodedInst>::bad(high.trap);
+
+    return Result<DecodedInst>::good(decode16(low16, static_cast<u16>(high.value)));
+}
+
+Result<u32> Cpu::fetch() {
+    Result<DecodedInst> inst = fetch_inst();
+    if (!inst) return Result<u32>::bad(inst.trap);
+    return Result<u32>::good(inst.value.raw);
 }
 
 Status Cpu::step() {
@@ -119,14 +145,16 @@ Status Cpu::step() {
         return Status::good();
     }
 
-    Result<u32> word = fetch();
-    if (!word) return handle_trap_or_stop(word.trap);
+    Result<DecodedInst> fetched = fetch_inst();
+    if (!fetched) return handle_trap_or_stop(fetched.trap);
 
-    const DecodedInst inst = decode(word.value);
+    const DecodedInst inst = fetched.value;
 
     // Default: fall through to the next instruction. Jumps and branches
-    // overwrite this inside execute().
-    next_pc_ = pc + 4;
+    // overwrite this inside execute(). The step is the instruction's own
+    // length, which is where the C extension reaches the execution loop - and
+    // is the only place it does.
+    next_pc_ = pc + inst.length;
     counter_written_ = false;
 
     if (trace) trace_inst(inst);
@@ -384,12 +412,15 @@ Status Cpu::execute(const DecodedInst& inst) {
         default:
             // Anything not yet implemented traps as an illegal instruction with
             // the offending bits in tval, rather than being skipped.
-            return Status::bad(Exception::IllegalInstruction, inst.raw);
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 }
 
 Status Cpu::set_branch_target(u64 target) {
-    if ((target & 0x3) != 0) {
+    // IALIGN is 16 with the C extension: a 2-byte-aligned target is legal, and
+    // compilers emit them constantly once compressed instructions are in play.
+    // Only an odd address is a misaligned jump now.
+    if ((target & 0x1) != 0) {
         return Status::bad(Exception::InstructionAddressMisaligned, target);
     }
     next_pc_ = target;
@@ -402,7 +433,13 @@ Status Cpu::set_branch_target(u64 target) {
 
 Status Cpu::execute_jal(const DecodedInst& inst) {
     const u64 target = pc + static_cast<u64>(inst.imm);
-    const u64 link   = pc + 4;
+
+    // The link address is the instruction *after* this one, which with the C
+    // extension is not always four bytes on. C.JALR expands to a JALR, and a
+    // compiler expects it to link pc + 2 - link pc + 4 and the return goes one
+    // instruction too far, skipping whatever followed the call. riscv-tests
+    // rv64uc/rvc check 36 exists precisely to catch this.
+    const u64 link = pc + inst.length;
 
     // Compute the target and check it *before* writing the link register, so a
     // misaligned jump leaves the machine untouched.
@@ -415,7 +452,7 @@ Status Cpu::execute_jal(const DecodedInst& inst) {
 
 Status Cpu::execute_jalr(const DecodedInst& inst) {
     if (inst.funct3 != 0x0) {
-        return Status::bad(Exception::IllegalInstruction, inst.raw);
+        return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 
     // The low bit of the computed target is cleared, unconditionally. This is
@@ -424,7 +461,7 @@ Status Cpu::execute_jalr(const DecodedInst& inst) {
     // indirect jumps. Note the ordering: add, *then* clear, so `jalr rd, rs1, 1`
     // is a legal way to reach an even address.
     const u64 target = (read_reg(inst.rs1) + static_cast<u64>(inst.imm)) & ~1ull;
-    const u64 link   = pc + 4;
+    const u64 link   = pc + inst.length;   // 2 after a C.JALR - see execute_jal
 
     Status st = set_branch_target(target);
     if (!st) return st;
@@ -448,10 +485,10 @@ Status Cpu::execute_branch(const DecodedInst& inst) {
         case 0x6: taken = (a < b); break;                                      // BLTU
         case 0x7: taken = (a >= b); break;                                     // BGEU
         default:
-            return Status::bad(Exception::IllegalInstruction, inst.raw);
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 
-    if (!taken) return Status::good();  // next_pc_ already points at pc + 4
+    if (!taken) return Status::good();  // next_pc_ already points past this one
 
     return set_branch_target(pc + static_cast<u64>(inst.imm));
 }
@@ -479,7 +516,7 @@ Status Cpu::execute_load(const DecodedInst& inst) {
         case 0x5: size = 2; signed_ = false; break;  // LHU
         case 0x6: size = 4; signed_ = false; break;  // LWU
         default:
-            return Status::bad(Exception::IllegalInstruction, inst.raw);
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 
     Result<u64> r = mem_load(addr, size, AccessType::Load);
@@ -509,7 +546,7 @@ Status Cpu::execute_store(const DecodedInst& inst) {
         case 0x2: size = 4; break;  // SW
         case 0x3: size = 8; break;  // SD
         default:
-            return Status::bad(Exception::IllegalInstruction, inst.raw);
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 
     // Stores have no sign/unsigned variants: they write the low `size` bytes of
@@ -543,7 +580,7 @@ Status Cpu::execute_op_imm(const DecodedInst& inst) {
             // On RV64 the shift amount is 6 bits. The upper 6 bits must be zero
             // for SLLI; any other encoding is reserved.
             if (inst.funct6() != 0x00) {
-                return Status::bad(Exception::IllegalInstruction, inst.raw);
+                return Status::bad(Exception::IllegalInstruction, inst.encoded);
             }
             write_reg(inst.rd, rs1 << inst.shamt6());
             return Status::good();
@@ -576,7 +613,7 @@ Status Cpu::execute_op_imm(const DecodedInst& inst) {
                 write_reg(inst.rd, static_cast<u64>(static_cast<i64>(rs1) >> shamt));
                 return Status::good();
             }
-            return Status::bad(Exception::IllegalInstruction, inst.raw);
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
         }
 
         case 0x6:  // ORI
@@ -588,7 +625,7 @@ Status Cpu::execute_op_imm(const DecodedInst& inst) {
             return Status::good();
 
         default:
-            return Status::bad(Exception::IllegalInstruction, inst.raw);
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 }
 
@@ -606,7 +643,7 @@ Status Cpu::execute_op_imm_32(const DecodedInst& inst) {
 
         case 0x1:  // SLLIW
             if (inst.funct7 != 0x00) {
-                return Status::bad(Exception::IllegalInstruction, inst.raw);
+                return Status::bad(Exception::IllegalInstruction, inst.encoded);
             }
             write_reg(inst.rd, sext32(rs1 << inst.shamt5()));
             return Status::good();
@@ -621,11 +658,11 @@ Status Cpu::execute_op_imm_32(const DecodedInst& inst) {
                 write_reg(inst.rd, sext32(static_cast<u32>(static_cast<i32>(rs1) >> shamt)));
                 return Status::good();
             }
-            return Status::bad(Exception::IllegalInstruction, inst.raw);
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
         }
 
         default:
-            return Status::bad(Exception::IllegalInstruction, inst.raw);
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 }
 
@@ -640,7 +677,7 @@ Status Cpu::execute_op(const DecodedInst& inst) {
     if (inst.funct7 == 0x01) return execute_mul_div(inst);
 
     if (inst.funct7 != 0x00 && inst.funct7 != 0x20) {
-        return Status::bad(Exception::IllegalInstruction, inst.raw);
+        return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 
     const u64 a = read_reg(inst.rs1);
@@ -658,22 +695,22 @@ Status Cpu::execute_op(const DecodedInst& inst) {
             return Status::good();
 
         case 0x1:  // SLL
-            if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.raw);
+            if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.encoded);
             write_reg(inst.rd, a << shamt);
             return Status::good();
 
         case 0x2:  // SLT
-            if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.raw);
+            if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.encoded);
             write_reg(inst.rd, (static_cast<i64>(a) < static_cast<i64>(b)) ? 1 : 0);
             return Status::good();
 
         case 0x3:  // SLTU
-            if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.raw);
+            if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.encoded);
             write_reg(inst.rd, (a < b) ? 1 : 0);
             return Status::good();
 
         case 0x4:  // XOR
-            if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.raw);
+            if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.encoded);
             write_reg(inst.rd, a ^ b);
             return Status::good();
 
@@ -686,17 +723,17 @@ Status Cpu::execute_op(const DecodedInst& inst) {
             return Status::good();
 
         case 0x6:  // OR
-            if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.raw);
+            if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.encoded);
             write_reg(inst.rd, a | b);
             return Status::good();
 
         case 0x7:  // AND
-            if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.raw);
+            if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.encoded);
             write_reg(inst.rd, a & b);
             return Status::good();
 
         default:
-            return Status::bad(Exception::IllegalInstruction, inst.raw);
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 }
 
@@ -704,7 +741,7 @@ Status Cpu::execute_op_32(const DecodedInst& inst) {
     if (inst.funct7 == 0x01) return execute_mul_div_32(inst);
 
     if (inst.funct7 != 0x00 && inst.funct7 != 0x20) {
-        return Status::bad(Exception::IllegalInstruction, inst.raw);
+        return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 
     const u32 a = static_cast<u32>(read_reg(inst.rs1));
@@ -719,7 +756,7 @@ Status Cpu::execute_op_32(const DecodedInst& inst) {
             return Status::good();
 
         case 0x1:  // SLLW
-            if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.raw);
+            if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.encoded);
             write_reg(inst.rd, sext32(a << shamt));
             return Status::good();
 
@@ -732,7 +769,7 @@ Status Cpu::execute_op_32(const DecodedInst& inst) {
             return Status::good();
 
         default:
-            return Status::bad(Exception::IllegalInstruction, inst.raw);
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 }
 
@@ -754,7 +791,7 @@ Status Cpu::execute_system(const DecodedInst& inst) {
     switch (inst.imm & 0xfff) {
         case 0x000:  // ECALL
             if (inst.rd != 0 || inst.rs1 != 0) {
-                return Status::bad(Exception::IllegalInstruction, inst.raw);
+                return Status::bad(Exception::IllegalInstruction, inst.encoded);
             }
             // The cause encodes which privilege level made the call, so that a
             // machine-mode handler can tell a kernel's SBI call apart from a
@@ -767,7 +804,7 @@ Status Cpu::execute_system(const DecodedInst& inst) {
 
         case 0x001:  // EBREAK
             if (inst.rd != 0 || inst.rs1 != 0) {
-                return Status::bad(Exception::IllegalInstruction, inst.raw);
+                return Status::bad(Exception::IllegalInstruction, inst.encoded);
             }
             return Status::bad(Exception::Breakpoint, pc);
 
@@ -779,7 +816,7 @@ Status Cpu::execute_system(const DecodedInst& inst) {
 
         case 0x105:  // WFI - wait for interrupt
             if (inst.rd != 0 || inst.rs1 != 0) {
-                return Status::bad(Exception::IllegalInstruction, inst.raw);
+                return Status::bad(Exception::IllegalInstruction, inst.encoded);
             }
             // The spec explicitly permits implementing WFI as a no-op: it is a
             // hint, and software must treat its completion as advisory and
@@ -792,7 +829,7 @@ Status Cpu::execute_system(const DecodedInst& inst) {
             // SFENCE.VMA shares funct3 == 0 but is an R-type: funct7 == 0x09,
             // with rs1/rs2 naming an address and an ASID to narrow the flush.
             if (inst.funct7 == 0x09) return execute_sfence_vma(inst);
-            return Status::bad(Exception::IllegalInstruction, inst.raw);
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 }
 
@@ -809,12 +846,12 @@ Status Cpu::execute_system(const DecodedInst& inst) {
 // ---------------------------------------------------------------------------
 Status Cpu::execute_mret(const DecodedInst& inst) {
     if (inst.rd != 0 || inst.rs1 != 0) {
-        return Status::bad(Exception::IllegalInstruction, inst.raw);
+        return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
     if (priv < PRIV_MACHINE) {
         // MRET from anything below machine mode is illegal. Unreachable until
         // phase 6, but the check belongs with the instruction.
-        return Status::bad(Exception::IllegalInstruction, inst.raw);
+        return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 
     u64 status = csrs.mstatus();
@@ -850,15 +887,15 @@ Status Cpu::execute_mret(const DecodedInst& inst) {
 // ---------------------------------------------------------------------------
 Status Cpu::execute_sret(const DecodedInst& inst) {
     if (inst.rd != 0 || inst.rs1 != 0) {
-        return Status::bad(Exception::IllegalInstruction, inst.raw);
+        return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
     if (priv < PRIV_SUPERVISOR) {
-        return Status::bad(Exception::IllegalInstruction, inst.raw);
+        return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
     // mstatus.TSR ("trap SRET") lets machine-mode firmware intercept a
     // supervisor's returns - used by hypervisors to virtualise them.
     if (priv == PRIV_SUPERVISOR && (csrs.mstatus() & csr::MSTATUS_TSR)) {
-        return Status::bad(Exception::IllegalInstruction, inst.raw);
+        return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 
     u64 status = csrs.mstatus();
@@ -893,15 +930,15 @@ Status Cpu::execute_sret(const DecodedInst& inst) {
 // ---------------------------------------------------------------------------
 Status Cpu::execute_sfence_vma(const DecodedInst& inst) {
     if (inst.rd != 0) {
-        return Status::bad(Exception::IllegalInstruction, inst.raw);
+        return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
     if (priv < PRIV_SUPERVISOR) {
-        return Status::bad(Exception::IllegalInstruction, inst.raw);
+        return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
     // mstatus.TVM ("trap virtual memory") intercepts a supervisor's page-table
     // management, again for virtualisation.
     if (priv == PRIV_SUPERVISOR && (csrs.mstatus() & csr::MSTATUS_TVM)) {
-        return Status::bad(Exception::IllegalInstruction, inst.raw);
+        return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 
     mmu.flush();
@@ -1057,7 +1094,7 @@ Status Cpu::execute_csr(const DecodedInst& inst) {
         }
 
         default:
-            return Status::bad(Exception::IllegalInstruction, inst.raw);
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 }
 
@@ -1153,7 +1190,7 @@ Status Cpu::execute_mul_div(const DecodedInst& inst) {
             return Status::good();
 
         default:
-            return Status::bad(Exception::IllegalInstruction, inst.raw);
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 }
 
@@ -1201,7 +1238,7 @@ Status Cpu::execute_mul_div_32(const DecodedInst& inst) {
             return Status::good();
 
         default:
-            return Status::bad(Exception::IllegalInstruction, inst.raw);
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 }
 
@@ -1241,7 +1278,7 @@ Status Cpu::execute_amo(const DecodedInst& inst) {
     unsigned size;
     if (inst.funct3 == 0x2)      size = 4;   // .W
     else if (inst.funct3 == 0x3) size = 8;   // .D
-    else return Status::bad(Exception::IllegalInstruction, inst.raw);
+    else return Status::bad(Exception::IllegalInstruction, inst.encoded);
 
     // Bits 31:27 select the operation; bits 26 and 25 are the aq/rl ordering
     // hints, which a single-hart in-order machine can ignore for the same
@@ -1254,7 +1291,7 @@ Status Cpu::execute_amo(const DecodedInst& inst) {
     }
 
     if (funct5 == 0x02) {  // LR
-        if (inst.rs2 != 0) return Status::bad(Exception::IllegalInstruction, inst.raw);
+        if (inst.rs2 != 0) return Status::bad(Exception::IllegalInstruction, inst.encoded);
         Result<u64> r = mem_load(addr, size, AccessType::Load);
         if (!r) return Status::bad(r.trap);
 
@@ -1303,7 +1340,7 @@ Status Cpu::execute_amo(const DecodedInst& inst) {
             case 0x14: result = static_cast<u32>(sa > sb ? sa : sb); break;  // AMOMAX
             case 0x18: result = (ua < ub) ? ua : ub; break;            // AMOMINU
             case 0x1c: result = (ua > ub) ? ua : ub; break;            // AMOMAXU
-            default: return Status::bad(Exception::IllegalInstruction, inst.raw);
+            default: return Status::bad(Exception::IllegalInstruction, inst.encoded);
         }
         Status st = mem_store(addr, 4, result);
         if (!st) return st;
@@ -1320,7 +1357,7 @@ Status Cpu::execute_amo(const DecodedInst& inst) {
             case 0x14: result = static_cast<u64>(sa > sb ? sa : sb); break;
             case 0x18: result = (orig < src) ? orig : src; break;
             case 0x1c: result = (orig > src) ? orig : src; break;
-            default: return Status::bad(Exception::IllegalInstruction, inst.raw);
+            default: return Status::bad(Exception::IllegalInstruction, inst.encoded);
         }
         Status st = mem_store(addr, 8, result);
         if (!st) return st;

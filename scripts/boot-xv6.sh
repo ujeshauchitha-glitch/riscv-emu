@@ -3,9 +3,9 @@
 # Fetch, build and boot xv6-riscv on the emulator.
 #
 # This is the phase 7 milestone in one command: it clones xv6 into third_party/
-# on first run, builds it for the extensions this emulator implements, checks
-# that the result really is free of compressed instructions, builds the
-# emulator if needed, and boots it with the filesystem image attached.
+# on first run, builds it exactly as it ships - no patched flags, no special
+# -march - builds the emulator if needed, and boots it with the filesystem
+# image attached.
 #
 # Usage:  scripts/boot-xv6.sh [-- extra emulator args]
 #
@@ -28,12 +28,6 @@ cd "$(dirname "$0")/.."
 REPO_URL="https://github.com/mit-pdos/xv6-riscv.git"
 SRC_DIR="third_party/xv6-riscv"
 EMU="build/riscv_emu"
-
-# xv6's stock build targets -march=rv64gc. The `c` is compressed 16-bit
-# instructions and `g` pulls in floating point; this emulator implements
-# neither yet (phase 8). These are the extensions it does implement.
-XV6_MARCH="rv64ima_zicsr_zifencei"
-XV6_MABI="lp64"
 
 # xv6 reaches the shell at roughly 500 million instructions, so the emulator's
 # 100-million default would stop it partway through boot. This budget is large
@@ -75,6 +69,12 @@ done
 (or gcc-riscv64-linux-gnu)"
 
 command -v make > /dev/null || die "make not found"
+command -v git  > /dev/null || die "git not found"
+
+if [ ! -x "$EMU" ]; then
+  command -v cmake > /dev/null || die "cmake not found, and $EMU is not built.
+Install cmake, or build the emulator some other way first."
+fi
 
 # --- the emulator -----------------------------------------------------------
 
@@ -93,54 +93,15 @@ if [ ! -d "$SRC_DIR/kernel" ]; then
   git clone --depth 1 "$REPO_URL" "$SRC_DIR" || die "could not clone $REPO_URL"
 fi
 
-# Point xv6's build at the extensions this emulator implements.
-#
-# There is no make variable for this. xv6's Makefile hardcodes `-march=rv64gc`
-# into CFLAGS, and its rule for assembly files spells out `$(CC) -march=rv64gc`
-# without including $(CFLAGS) at all - so even a Makefile that did honour an
-# override for C would still assemble entry.S, swtch.S, kernelvec.S and
-# trampoline.S as rv64gc. That is exactly what happens if you try the obvious
-# `make CFLAGS_EXTRA=...`: the build succeeds, the kernel looks fine, and it
-# dies on the third instruction of _entry with an illegal instruction.
-#
-# So patch the two occurrences directly. Idempotent - after the first run there
-# is no `-march=rv64gc` left to replace.
-if grep -q -- "-march=rv64gc" "$SRC_DIR/Makefile"; then
-  step "Retargeting xv6's Makefile at -march=$XV6_MARCH"
-  sed -i "s/-march=rv64gc/-march=$XV6_MARCH -mabi=$XV6_MABI/g" "$SRC_DIR/Makefile" \
-    || die "could not patch $SRC_DIR/Makefile"
-  # Any objects built before the patch are the wrong architecture.
-  make -C "$SRC_DIR" clean > /dev/null 2>&1
-fi
-
 if [ "$REBUILD" = 1 ]; then
   step "Cleaning xv6"
   make -C "$SRC_DIR" clean > /dev/null 2>&1
 fi
 
 if [ ! -f "$SRC_DIR/kernel/kernel" ] || [ ! -f "$SRC_DIR/fs.img" ]; then
-  step "Building xv6 for -march=$XV6_MARCH"
+  step "Building xv6"
   make -C "$SRC_DIR" kernel/kernel fs.img > /tmp/xv6-build.log 2>&1 \
     || { tail -20 /tmp/xv6-build.log; die "xv6 build failed (full log: /tmp/xv6-build.log)"; }
-fi
-
-# Confirm the build really is free of compressed instructions, rather than
-# trusting that the patch reached every file. A kernel with even one would stop
-# the emulator with an illegal-instruction trap at a baffling address.
-#
-# Note the `-M no-aliases`. Without it objdump prints a compressed instruction
-# under its expanded name - `c.lui` shows up as plain `lui` - so a search for
-# `c.` finds nothing and the check passes on a kernel that is 5,000
-# compressed instructions deep. That is not a hypothetical: it is what this
-# check did before, and it is why the failure above reached the emulator.
-if command -v "${TOOLPREFIX}objdump" > /dev/null; then
-  compressed=$("${TOOLPREFIX}objdump" -d -M no-aliases "$SRC_DIR/kernel/kernel" \
-                 | grep -c $'\tc\\.' || true)
-  if [ "$compressed" != 0 ]; then
-    die "kernel contains $compressed compressed instructions, which this
-emulator cannot decode yet (phase 8). Try: scripts/boot-xv6.sh --rebuild"
-  fi
-  printf '%s    kernel is free of compressed instructions%s\n' "$DIM" "$OFF"
 fi
 
 # --- boot -------------------------------------------------------------------

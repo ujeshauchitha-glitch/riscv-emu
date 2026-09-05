@@ -25,8 +25,18 @@ EMU="build/riscv_emu"
 
 # Suites the emulator can run today. rv64si needs supervisor mode (phase 6) and
 # rv64uf/rv64ud need floating point (phase 8), so they are deliberately absent.
-DEFAULT_SUITES="rv64ui rv64um rv64ua rv64mi rv64si"
+DEFAULT_SUITES="rv64ui rv64um rv64ua rv64mi rv64si rv64uc"
 SUITES="${*:-$DEFAULT_SUITES}"
+
+# The ISA string each suite is built with. rv64uc is the compressed-instruction
+# suite, so it needs `c` in the -march; the rest are deliberately built without
+# it, so that a failure there is never confounded by the decompressor.
+march_for_suite() {
+  case "$1" in
+    rv64uc) echo "rv64imac_zicsr_zifencei" ;;
+    *)      echo "rv64ima_zicsr_zifencei" ;;
+  esac
+}
 
 # Tests that need a feature the emulator does not implement yet. These are
 # listed explicitly, with the reason, rather than being quietly dropped - an
@@ -107,7 +117,7 @@ for suite in $SUITES; do
 
     TOTAL=$((TOTAL + 1)); s_total=$((s_total + 1))
 
-    if ! riscv64-unknown-elf-gcc -march=rv64ima_zicsr_zifencei -mabi=lp64 \
+    if ! riscv64-unknown-elf-gcc -march="$(march_for_suite "$suite")" -mabi=lp64 \
          -nostdlib -nostartfiles \
          -I "$ENV_DIR" -I "$MACROS" \
          -T "$ENV_DIR/link.ld" -o "$elf" "$src" > "$BUILD_DIR/${name}.log" 2>&1; then
