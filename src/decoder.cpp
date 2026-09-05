@@ -87,7 +87,9 @@ Format format_for_opcode(u32 opcode) {
 
 DecodedInst decode(u32 raw) {
     DecodedInst inst;
-    inst.raw = raw;
+    inst.raw     = raw;
+    inst.encoded = raw;
+    inst.length  = 4;
 
     // These four fields sit in fixed positions in every format that has them,
     // so they can be extracted unconditionally. (A format that lacks a given
@@ -114,6 +116,307 @@ DecodedInst decode(u32 raw) {
             break;
     }
 
+    return inst;
+}
+
+
+// ---------------------------------------------------------------------------
+// The C extension: expanding 16 bits into 32.
+//
+// Two things make this fiddly, and both are deliberate design choices in the
+// spec rather than accidents.
+//
+// **The registers are three bits wide.** A compressed instruction has no room
+// for two or three 5-bit register fields, so most of them can only name eight
+// registers - x8 through x15. Those are the ones a compiler uses most (the
+// saved registers s0/s1 and the first argument/temporary registers a0-a5), so
+// in practice the restriction costs little.
+//
+// **The immediates are scattered.** Bits of an offset appear in whatever
+// corners of the 16-bit word were free, in an order that looks random. It is
+// not: the layout is chosen so that each bit lands in the same *physical wire
+// position* as it occupies in the 32-bit form wherever possible, which makes
+// the expansion cheap in hardware. It makes it verbose in software, which is
+// why every one of the encodings below is written out explicitly with the
+// spec's own bit-range notation in a comment. Guessing here produces an
+// emulator that runs most programs and corrupts a few.
+// ---------------------------------------------------------------------------
+namespace {
+
+// The 3-bit register fields name x8..x15.
+constexpr u32 creg(u32 three_bits) { return three_bits + 8; }
+
+// Assemble the six 32-bit formats from their parts. Writing these once and
+// building every expansion out of them keeps each case below to a line or two
+// of immediate arithmetic, which is the part that actually differs.
+constexpr u32 enc_r(u32 opcode, u32 rd, u32 funct3, u32 rs1, u32 rs2, u32 funct7) {
+    return (funct7 << 25) | (rs2 << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | opcode;
+}
+constexpr u32 enc_i(u32 opcode, u32 rd, u32 funct3, u32 rs1, u32 imm) {
+    return ((imm & 0xfff) << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | opcode;
+}
+constexpr u32 enc_s(u32 opcode, u32 funct3, u32 rs1, u32 rs2, u32 imm) {
+    return ((imm & 0xfe0) << 20) | (rs2 << 20) | (rs1 << 15) | (funct3 << 12) |
+           ((imm & 0x1f) << 7) | opcode;
+}
+constexpr u32 enc_b(u32 opcode, u32 funct3, u32 rs1, u32 rs2, u32 imm) {
+    return ((imm & 0x1000) << 19) | ((imm & 0x7e0) << 20) | (rs2 << 20) | (rs1 << 15) |
+           (funct3 << 12) | ((imm & 0x1e) << 7) | ((imm & 0x800) >> 4) | opcode;
+}
+constexpr u32 enc_u(u32 opcode, u32 rd, u32 imm) {
+    return (imm & 0xfffff000) | (rd << 7) | opcode;
+}
+constexpr u32 enc_j(u32 opcode, u32 rd, u32 imm) {
+    return ((imm & 0x100000) << 11) | ((imm & 0x7fe) << 20) | ((imm & 0x800) << 9) |
+           (imm & 0xff000) | (rd << 7) | opcode;
+}
+
+// Sign-extend the low `bits` of `value`.
+constexpr u32 sx(u32 value, unsigned bits) {
+    const u32 sign = 1u << (bits - 1);
+    return (value ^ sign) - sign;
+}
+
+u32 bits(u16 h, unsigned hi, unsigned lo) {
+    return (static_cast<u32>(h) >> lo) & ((1u << (hi - lo + 1)) - 1);
+}
+
+}  // namespace
+
+u32 decompress(u16 h) {
+    if (h == 0) return 0;   // the all-zero halfword is permanently illegal
+
+    const u32 op     = h & 0x3;
+    const u32 funct3 = bits(h, 15, 13);
+
+    // Fields shared by several formats.
+    const u32 rd_rs1  = bits(h, 11, 7);    // full 5-bit field
+    const u32 rs2     = bits(h, 6, 2);     // full 5-bit field
+    const u32 rd_p    = creg(bits(h, 4, 2));    // rd'  / rs2'
+    const u32 rs1_p   = creg(bits(h, 9, 7));    // rs1' / rd'
+
+    switch (op) {
+    // --- Quadrant 0 ---------------------------------------------------------
+    case 0:
+        switch (funct3) {
+        case 0: {
+            // C.ADDI4SPN: addi rd', x2, nzuimm
+            //   nzuimm[5:4] = inst[12:11], [9:6] = inst[10:7], [2] = inst[6],
+            //   [3] = inst[5].  A zero immediate is the reserved encoding.
+            const u32 imm = (bits(h, 10, 7) << 6) | (bits(h, 12, 11) << 4) |
+                            (bits(h, 5, 5) << 3) | (bits(h, 6, 6) << 2);
+            if (imm == 0) return 0;
+            return enc_i(opcodes::OP_IMM, rd_p, 0x0, 2, imm);
+        }
+        case 2: {
+            // C.LW: lw rd', offset(rs1')
+            //   offset[5:3] = inst[12:10], [2] = inst[6], [6] = inst[5]
+            const u32 imm = (bits(h, 5, 5) << 6) | (bits(h, 12, 10) << 3) |
+                            (bits(h, 6, 6) << 2);
+            return enc_i(opcodes::LOAD, rd_p, 0x2, rs1_p, imm);
+        }
+        case 3: {
+            // C.LD: ld rd', offset(rs1')
+            //   offset[5:3] = inst[12:10], [7:6] = inst[6:5]
+            const u32 imm = (bits(h, 6, 5) << 6) | (bits(h, 12, 10) << 3);
+            return enc_i(opcodes::LOAD, rd_p, 0x3, rs1_p, imm);
+        }
+        case 6: {
+            // C.SW: sw rs2', offset(rs1')
+            const u32 imm = (bits(h, 5, 5) << 6) | (bits(h, 12, 10) << 3) |
+                            (bits(h, 6, 6) << 2);
+            return enc_s(opcodes::STORE, 0x2, rs1_p, rd_p, imm);
+        }
+        case 7: {
+            // C.SD: sd rs2', offset(rs1')
+            const u32 imm = (bits(h, 6, 5) << 6) | (bits(h, 12, 10) << 3);
+            return enc_s(opcodes::STORE, 0x3, rs1_p, rd_p, imm);
+        }
+        default:
+            // funct3 1 and 5 are C.FLD/C.FSD, which need the D extension; 4 is
+            // reserved. All illegal here.
+            return 0;
+        }
+
+    // --- Quadrant 1 ---------------------------------------------------------
+    case 1:
+        switch (funct3) {
+        case 0: {
+            // C.ADDI: addi rd, rd, nzimm.  rd == 0 is C.NOP, which expands to
+            // `addi x0, x0, 0` and is a genuine no-op either way.
+            const u32 imm = sx((bits(h, 12, 12) << 5) | rs2, 6);
+            return enc_i(opcodes::OP_IMM, rd_rs1, 0x0, rd_rs1, imm);
+        }
+        case 1: {
+            // C.ADDIW: addiw rd, rd, imm.  rd == 0 is reserved - unlike C.ADDI
+            // there is no harmless reading of it, since ADDIW with rd=x0 would
+            // still have to sign-extend something.
+            if (rd_rs1 == 0) return 0;
+            const u32 imm = sx((bits(h, 12, 12) << 5) | rs2, 6);
+            return enc_i(opcodes::OP_IMM_32, rd_rs1, 0x0, rd_rs1, imm);
+        }
+        case 2: {
+            // C.LI: addi rd, x0, imm
+            const u32 imm = sx((bits(h, 12, 12) << 5) | rs2, 6);
+            return enc_i(opcodes::OP_IMM, rd_rs1, 0x0, 0, imm);
+        }
+        case 3: {
+            if (rd_rs1 == 2) {
+                // C.ADDI16SP: addi x2, x2, nzimm
+                //   nzimm[9] = inst[12], [4] = inst[6], [6] = inst[5],
+                //   [8:7] = inst[4:3], [5] = inst[2]
+                const u32 imm = sx((bits(h, 12, 12) << 9) | (bits(h, 4, 3) << 7) |
+                                   (bits(h, 5, 5) << 6) | (bits(h, 2, 2) << 5) |
+                                   (bits(h, 6, 6) << 4), 10);
+                if (imm == 0) return 0;
+                return enc_i(opcodes::OP_IMM, 2, 0x0, 2, imm);
+            }
+            // C.LUI: lui rd, nzimm.  rd must not be x0 or x2, and the immediate
+            // must not be zero.
+            if (rd_rs1 == 0) return 0;
+            const u32 imm = sx((bits(h, 12, 12) << 5) | rs2, 6);
+            if (imm == 0) return 0;
+            return enc_u(opcodes::LUI, rd_rs1, imm << 12);
+        }
+        case 4: {
+            // MISC-ALU. inst[11:10] selects the group.
+            const u32 group = bits(h, 11, 10);
+            if (group == 0 || group == 1) {
+                // C.SRLI / C.SRAI: shamt[5] = inst[12], shamt[4:0] = inst[6:2].
+                // RV64 allows the full 6 bits, so nothing here is reserved.
+                const u32 shamt  = (bits(h, 12, 12) << 5) | rs2;
+                const u32 funct6 = (group == 0) ? 0x00 : 0x10;
+                return (funct6 << 26) | (shamt << 20) | (rs1_p << 15) |
+                       (0x5 << 12) | (rs1_p << 7) | opcodes::OP_IMM;
+            }
+            if (group == 2) {
+                // C.ANDI: andi rd', rd', imm
+                const u32 imm = sx((bits(h, 12, 12) << 5) | rs2, 6);
+                return enc_i(opcodes::OP_IMM, rs1_p, 0x7, rs1_p, imm);
+            }
+            // group == 3: register-register ALU. inst[12] picks the 64-bit
+            // *W forms, inst[6:5] the operation.
+            const u32 sel = bits(h, 6, 5);
+            if (bits(h, 12, 12) == 0) {
+                switch (sel) {
+                case 0: return enc_r(opcodes::OP, rs1_p, 0x0, rs1_p, rd_p, 0x20); // C.SUB
+                case 1: return enc_r(opcodes::OP, rs1_p, 0x4, rs1_p, rd_p, 0x00); // C.XOR
+                case 2: return enc_r(opcodes::OP, rs1_p, 0x6, rs1_p, rd_p, 0x00); // C.OR
+                default:return enc_r(opcodes::OP, rs1_p, 0x7, rs1_p, rd_p, 0x00); // C.AND
+                }
+            }
+            switch (sel) {
+            case 0: return enc_r(opcodes::OP_32, rs1_p, 0x0, rs1_p, rd_p, 0x20); // C.SUBW
+            case 1: return enc_r(opcodes::OP_32, rs1_p, 0x0, rs1_p, rd_p, 0x00); // C.ADDW
+            default: return 0;   // reserved
+            }
+        }
+        case 5: {
+            // C.J: jal x0, offset
+            //   offset[11] = inst[12], [4] = inst[11], [9:8] = inst[10:9],
+            //   [10] = inst[8], [6] = inst[7], [7] = inst[6],
+            //   [3:1] = inst[5:3], [5] = inst[2]
+            const u32 imm = sx((bits(h, 12, 12) << 11) | (bits(h, 8, 8) << 10) |
+                               (bits(h, 10, 9) << 8) | (bits(h, 6, 6) << 7) |
+                               (bits(h, 7, 7) << 6) | (bits(h, 2, 2) << 5) |
+                               (bits(h, 11, 11) << 4) | (bits(h, 5, 3) << 1), 12);
+            return enc_j(opcodes::JAL, 0, imm);
+        }
+        case 6:
+        case 7: {
+            // C.BEQZ / C.BNEZ: compare rs1' against x0.
+            //   offset[8] = inst[12], [4:3] = inst[11:10], [7:6] = inst[6:5],
+            //   [2:1] = inst[4:3], [5] = inst[2]
+            const u32 imm = sx((bits(h, 12, 12) << 8) | (bits(h, 6, 5) << 6) |
+                               (bits(h, 2, 2) << 5) | (bits(h, 11, 10) << 3) |
+                               (bits(h, 4, 3) << 1), 9);
+            return enc_b(opcodes::BRANCH, (funct3 == 6) ? 0x0 : 0x1, rs1_p, 0, imm);
+        }
+        default:
+            return 0;
+        }
+
+    // --- Quadrant 2 ---------------------------------------------------------
+    case 2:
+        switch (funct3) {
+        case 0: {
+            // C.SLLI: slli rd, rd, shamt
+            if (rd_rs1 == 0) return 0;
+            const u32 shamt = (bits(h, 12, 12) << 5) | rs2;
+            return (shamt << 20) | (rd_rs1 << 15) | (0x1 << 12) | (rd_rs1 << 7) |
+                   opcodes::OP_IMM;
+        }
+        case 2: {
+            // C.LWSP: lw rd, offset(x2)
+            //   offset[5] = inst[12], [4:2] = inst[6:4], [7:6] = inst[3:2]
+            if (rd_rs1 == 0) return 0;
+            const u32 imm = (bits(h, 3, 2) << 6) | (bits(h, 12, 12) << 5) |
+                            (bits(h, 6, 4) << 2);
+            return enc_i(opcodes::LOAD, rd_rs1, 0x2, 2, imm);
+        }
+        case 3: {
+            // C.LDSP: ld rd, offset(x2)
+            //   offset[5] = inst[12], [4:3] = inst[6:5], [8:6] = inst[4:2]
+            if (rd_rs1 == 0) return 0;
+            const u32 imm = (bits(h, 4, 2) << 6) | (bits(h, 12, 12) << 5) |
+                            (bits(h, 6, 5) << 3);
+            return enc_i(opcodes::LOAD, rd_rs1, 0x3, 2, imm);
+        }
+        case 4: {
+            if (bits(h, 12, 12) == 0) {
+                // C.JR: jalr x0, 0(rs1)   -   C.MV: add rd, x0, rs2
+                if (rs2 == 0) {
+                    if (rd_rs1 == 0) return 0;   // reserved
+                    return enc_i(opcodes::JALR, 0, 0x0, rd_rs1, 0);
+                }
+                return enc_r(opcodes::OP, rd_rs1, 0x0, 0, rs2, 0x00);
+            }
+            // C.EBREAK / C.JALR / C.ADD
+            if (rs2 == 0) {
+                if (rd_rs1 == 0) return 0x00100073;              // C.EBREAK
+                return enc_i(opcodes::JALR, 1, 0x0, rd_rs1, 0);  // C.JALR
+            }
+            return enc_r(opcodes::OP, rd_rs1, 0x0, rd_rs1, rs2, 0x00);  // C.ADD
+        }
+        case 6: {
+            // C.SWSP: sw rs2, offset(x2)
+            //   offset[5:2] = inst[12:9], [7:6] = inst[8:7]
+            const u32 imm = (bits(h, 8, 7) << 6) | (bits(h, 12, 9) << 2);
+            return enc_s(opcodes::STORE, 0x2, 2, rs2, imm);
+        }
+        case 7: {
+            // C.SDSP: sd rs2, offset(x2)
+            //   offset[5:3] = inst[12:10], [8:6] = inst[9:7]
+            const u32 imm = (bits(h, 9, 7) << 6) | (bits(h, 12, 10) << 3);
+            return enc_s(opcodes::STORE, 0x3, 2, rs2, imm);
+        }
+        default:
+            // 1 and 5 are C.FLDSP/C.FSDSP, which need the D extension.
+            return 0;
+        }
+
+    default:
+        // op == 3 means this was not a compressed instruction at all; the
+        // caller is responsible for checking that before calling here.
+        return 0;
+    }
+}
+
+DecodedInst decode16(u16 low, u16 high) {
+    if (is_32bit_instruction(low)) {
+        const u32 raw = (static_cast<u32>(high) << 16) | low;
+        DecodedInst inst = decode(raw);
+        inst.encoded = raw;
+        inst.length  = 4;
+        return inst;
+    }
+
+    // A compressed instruction decodes as its expansion, so everything
+    // downstream is unchanged - but `encoded` and `length` remember that the
+    // program contained sixteen bits, not thirty-two.
+    DecodedInst inst = decode(decompress(low));
+    inst.encoded = low;
+    inst.length  = 2;
     return inst;
 }
 
