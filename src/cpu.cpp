@@ -89,6 +89,21 @@ Status Cpu::step() {
         clint->update(csrs);
     }
 
+    // Sample the UART's level-triggered line, then let the PLIC arbitrate
+    // between whatever is asserted and drive MEIP/SEIP.
+    //
+    // Host keystrokes are collected on the same path, but only every 4096th
+    // instruction: a read() syscall per emulated instruction would cost more
+    // than the instruction itself and cut the machine's speed by an order of
+    // magnitude. At ~15M instructions a second that is still a poll every
+    // fraction of a millisecond, far below anything a typist notices.
+    if (uart && (instret & 0xfff) == 0) uart->poll_host_input();
+
+    if (plic) {
+        if (uart) plic->set_pending(uart_irq, uart->interrupting());
+        plic->update(csrs);
+    }
+
     // Interrupts are checked before the fetch, not after the instruction.
     // An interrupt is not caused by the instruction at the PC - it is an
     // external event that happens *between* instructions, so the instruction
@@ -137,7 +152,7 @@ Status Cpu::step() {
 Status Cpu::handle_trap_or_stop(const Trap& trap) {
     last_trap = trap;
 
-    if (trap_fatal_without_handler && csrs.read(csr::MTVEC) == 0) {
+    if (trap_fatal_without_handler && !handler_installed_for(trap)) {
         // Leave pc on the faulting instruction, which is both what a register
         // dump wants to show and what mepc would have received.
         return Status::bad(trap);
@@ -145,6 +160,20 @@ Status Cpu::handle_trap_or_stop(const Trap& trap) {
 
     take_trap(trap);
     return Status::good();
+}
+
+// Would this trap reach a vector the guest actually wrote?
+//
+// The check has to follow the same delegation decision enter_trap() will make,
+// not just look at mtvec. xv6 is the case that proves it: it delegates every
+// exception to supervisor mode (medeleg = 0xffff), installs stvec, and never
+// writes mtvec at all - so mtvec == 0 is entirely legitimate there. Testing
+// mtvec alone would declare the first delegated ECALL from user mode fatal,
+// stopping the emulator on the very trap the kernel is waiting for.
+bool Cpu::handler_installed_for(const Trap& trap) const {
+    const bool to_supervisor = (priv <= PRIV_SUPERVISOR) &&
+                               csrs.delegated_exception(trap.cause_code());
+    return csrs.read(to_supervisor ? csr::STVEC : csr::MTVEC) != 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -899,6 +928,27 @@ Result<u64> Cpu::csr_read(u32 addr) const {
     if (tvm_blocks(addr)) {
         return Result<u64>::bad(Exception::IllegalInstruction, 0);
     }
+
+    // The unprivileged counters are readable from a lower privilege level only
+    // when the level above has enabled them. That is how a kernel can deny user
+    // code a high-resolution clock - a real concern, since precise timing is
+    // what side-channel attacks are built on.
+    if (addr == csr::CYCLE && !csrs.counter_enabled(0, priv)) {
+        return Result<u64>::bad(Exception::IllegalInstruction, 0);
+    }
+    if (addr == csr::TIME && !csrs.counter_enabled(1, priv)) {
+        return Result<u64>::bad(Exception::IllegalInstruction, 0);
+    }
+    if (addr == csr::INSTRET && !csrs.counter_enabled(2, priv)) {
+        return Result<u64>::bad(Exception::IllegalInstruction, 0);
+    }
+
+    // `time` is not a counter the hart keeps: it is a window onto the CLINT's
+    // mtime, which is the machine-wide clock every hart shares.
+    if (addr == csr::TIME && clint) {
+        return Result<u64>::good(clint->mtime());
+    }
+
     return Result<u64>::good(csrs.read(addr));
 }
 
@@ -1366,7 +1416,29 @@ void Cpu::dump_registers(std::ostream& os) const {
            << std::dec << "\n";
     }
     os << std::setfill(' ') << "instret: " << instret << "\n";
-    os << "=====================\n";
+
+    // Privilege and the CSRs that explain where a kernel has got to. Without
+    // these a dump from a booting OS says almost nothing: the same PC means
+    // very different things in machine mode with paging off and in supervisor
+    // mode with a page table installed.
+    os << "priv   : " << privilege_name(priv) << "\n";
+    auto csr_line = [&](const char* label, u32 addr) {
+        os << std::left << std::setfill(' ') << std::setw(12) << label << std::right
+           << ": 0x" << std::hex << std::setfill('0') << std::setw(16)
+           << csrs.read(addr) << std::dec << "\n";
+    };
+    csr_line("mstatus", csr::MSTATUS);
+    csr_line("mcause", csr::MCAUSE);
+    csr_line("mepc", csr::MEPC);
+    csr_line("mtvec", csr::MTVEC);
+    csr_line("scause", csr::SCAUSE);
+    csr_line("sepc", csr::SEPC);
+    csr_line("stval", csr::STVAL);
+    csr_line("stvec", csr::STVEC);
+    csr_line("satp", csr::SATP);
+    csr_line("mip", csr::MIP);
+    csr_line("mie", csr::MIE);
+    os << std::setfill(' ') << "=====================\n";
 
     os.flags(saved);
 }

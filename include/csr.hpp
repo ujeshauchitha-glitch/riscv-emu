@@ -73,6 +73,28 @@ constexpr u32 SIP       = 0x144;
 // --- supervisor address translation ---
 constexpr u32 SATP      = 0x180;
 
+// --- Sstc: the supervisor timer ---
+//
+// Without Sstc, a supervisor asks machine-mode firmware to set the timer for it
+// (an SBI call on every tick). Sstc gives supervisor mode its own compare
+// register, so a kernel arms its next tick directly. It is gated by
+// menvcfg.STCE so that firmware stays in control of whether S-mode may.
+constexpr u32 STIMECMP  = 0x14d;
+
+// --- machine environment configuration ---
+constexpr u32 MENVCFG   = 0x30a;
+constexpr u64 MENVCFG_STCE = 1ull << 63;   // enable Sstc for S-mode
+constexpr u64 MENVCFG_ADUE = 1ull << 61;   // hardware updates of PTE A/D bits
+
+// --- physical memory protection ---
+//
+// PMP restricts what physical addresses each privilege level may touch. It is
+// stored here but NOT enforced: see the note in csr.cpp.
+constexpr u32 PMPCFG0   = 0x3a0;
+constexpr u32 PMPCFG2   = 0x3a2;
+constexpr u32 PMPADDR0  = 0x3b0;
+constexpr u32 PMPADDR15 = 0x3bf;
+
 // --- counters ---
 // The unprivileged shadows (CYCLE, TIME, INSTRET) read the same underlying
 // state as their machine-mode counterparts.
@@ -186,6 +208,18 @@ public:
     bool mstatus_sie() const { return (mstatus() & csr::MSTATUS_SIE) != 0; }
     bool mstatus_sum() const { return (mstatus() & csr::MSTATUS_SUM) != 0; }
     bool mstatus_mxr() const { return (mstatus() & csr::MSTATUS_MXR) != 0; }
+
+    // Counter-enable bits. Bit 0 is CY (cycle), 1 is TM (time), 2 is IR
+    // (instret). A less privileged mode may read a counter only if the next
+    // mode up has enabled it, so a kernel can deny user code a clock.
+    bool counter_enabled(u32 bit, u32 priv) const {
+        if (priv >= PRIV_MACHINE) return true;
+        if (((read(csr::MCOUNTEREN) >> bit) & 1) == 0) return false;
+        if (priv == PRIV_SUPERVISOR) return true;
+        return ((read(csr::SCOUNTEREN) >> bit) & 1) != 0;
+    }
+
+    bool sstc_enabled() const { return (read(csr::MENVCFG) & csr::MENVCFG_STCE) != 0; }
 
     u64 satp() const { return read(csr::SATP); }
     u64 satp_mode() const { return (satp() & csr::SATP_MODE_MASK) >> csr::SATP_MODE_SHIFT; }

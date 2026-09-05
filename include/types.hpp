@@ -51,6 +51,10 @@ constexpr u64 UART0_BASE  = 0x1000'0000;
 constexpr u64 VIRTIO_BASE = 0x1000'1000;
 constexpr u64 DRAM_BASE   = 0x8000'0000;
 
+// Interrupt numbers on the PLIC, matching the QEMU virt machine.
+constexpr u32 VIRTIO0_IRQ = 1;
+constexpr u32 UART0_IRQ   = 10;
+
 // Default guest RAM size. 128 MiB is comfortably more than xv6 needs and enough
 // for a minimal Linux + initramfs later.
 constexpr u64 DRAM_SIZE_DEFAULT = 128ull * 1024 * 1024;

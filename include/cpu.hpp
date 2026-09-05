@@ -8,6 +8,8 @@
 #include "csr.hpp"
 #include "decoder.hpp"
 #include "mmu.hpp"
+#include "plic.hpp"
+#include "uart.hpp"
 #include "syscon.hpp"
 #include "result.hpp"
 #include "types.hpp"
@@ -106,6 +108,15 @@ public:
     Clint*        clint  = nullptr;
     const Syscon* syscon = nullptr;
 
+    // External interrupts. The UART's line is level-triggered - it stays
+    // asserted while a character is waiting - so the CPU samples it each step
+    // and tells the PLIC, rather than the UART pushing an edge.
+    // Not const: the console is polled for host input from the step loop, so
+    // that a guest shell can be typed at.
+    Plic* plic     = nullptr;
+    Uart* uart     = nullptr;
+    u32   uart_irq = 0;
+
     // Set when a syscon poweroff or reboot stops the run.
     bool halted = false;
 
@@ -193,6 +204,10 @@ private:
 
     // Dispatch a trap to the guest handler, or stop when none is installed.
     Status handle_trap_or_stop(const Trap& trap);
+
+    // True when the mode that will actually receive this trap has a vector
+    // installed. Delegation decides which vector that is - see the definition.
+    bool handler_installed_for(const Trap& trap) const;
 
     // Redirect control flow to `target`, or raise InstructionAddressMisaligned.
     //
