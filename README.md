@@ -7,8 +7,23 @@ No dependencies: a C++20 compiler and CMake ≥ 3.16 are all you need.
 
 ## Status
 
-**It boots an OS.** xv6-riscv reaches a shell prompt, the prompt can be typed
-at, and `ls` and `cat` read real data off a virtio disk image:
+**It boots Linux.** An unmodified Linux 6.6 kernel, stock `defconfig`, running
+on an emulator written from scratch:
+
+```
+[    0.000000] Linux version 6.6.0 (riscv64-linux-gnu-gcc 13.3.0) #1 SMP
+[    0.000000] Machine model: riscv-emu,virt
+[    0.000000] SBI specification v0.3 detected
+[    0.000000] riscv: base ISA extensions acdfim
+[    6.540482] 10000000.serial: ttyS0 at MMIO 0x10000000 (irq = 12) is a 16550A
+[    7.138788] virtio_blk virtio0: 1/0/0 default/read/poll queues
+[    9.936166] Run /init as init process
+
+  Linux is running on the riscv-emu emulator.
+```
+
+**And xv6.** It reaches a shell prompt, the prompt can be typed at, `usertests`
+passes in full, and `ls` and `cat` read real data off a virtio disk image:
 
 ```
 xv6 kernel is booting
@@ -30,13 +45,13 @@ Every [`riscv-tests`](https://github.com/riscv-software-src/riscv-tests) case
 the emulator can build passes:
 
 ```
-rv64ui 54/54   rv64um 13/13   rv64ua 19/19   rv64mi 11/11   rv64si 4/4   rv64uc 1/1
-102/102 passed
+rv64ui 54/54   rv64um 13/13   rv64ua 19/19   rv64mi 11/11
+rv64si  4/4    rv64uc  1/1    rv64uf 11/11   rv64ud 12/12
+125/125 passed
 ```
 
-**Phases 0-8 in progress.** The C (compressed) extension has landed, so
-**stock, unmodified xv6 boots** - no special build flags. Next in phase 8: the
-floating-point extensions, a device tree and SBI - and then Linux.
+**All nine phases done.** Stock unmodified xv6 boots to a shell and passes
+`usertests` in full; an unmodified Linux 6.6 kernel boots to a user process.
 
 [`docs/07-booting-xv6.md`](docs/07-booting-xv6.md) explains how the boot works
 and the two bugs that stood between "runs a kernel" and "boots xv6".
@@ -61,7 +76,10 @@ and the two bugs that stood between "runs a kernel" and "boots xv6".
 | **Boots stock xv6-riscv to a shell**, `usertests` passes in full | ✅ |
 | PMP — registers stored, *not enforced* | ⚠️ partial |
 | **C** — compressed instructions | ✅ complete |
-| F/D — floating point | ⬜ phase 8 |
+| **F/D** — floating point | ✅ complete |
+| **Device tree** — generated, `dtc`-validated | ✅ complete |
+| **SBI** — firmware services for a supervisor | ✅ complete |
+| **Boots Linux 6.6** to a user process | ✅ |
 
 Instructions that are not implemented yet raise an illegal-instruction trap
 rather than being silently mis-executed, so a program that needs them fails
@@ -86,7 +104,7 @@ gcc-riscv64-unknown-elf`.
 ./run-all.sh
 ```
 
-Builds the project, runs all fourteen test suites, then runs the demo and every
+Builds the project, runs all sixteen test suites, then runs the demo and every
 self-test and reports what each produced. Use `--quick` to skip the clean
 rebuild.
 
@@ -131,10 +149,11 @@ read a trace or a stop message when something goes wrong.
 cd build && ctest --output-on-failure
 ```
 
-Fourteen suites: unit tests for the decoder, the bus, the CPU, the RV64I
+Sixteen suites: unit tests for the decoder, the bus, the CPU, the RV64I
 instruction set, the CSR/trap machinery, the M/A extensions, the devices,
-supervisor mode with the MMU, the PLIC and virtio block device, and the
-compressed-instruction decoder, plus four bare-metal self-tests
+supervisor mode with the MMU, the PLIC and virtio block device, the
+compressed-instruction decoder, floating point, and the device tree and SBI,
+plus four bare-metal self-tests
 assembled with a real RISC-V toolchain. The self-tests are skipped automatically
 when no toolchain is present - to enable them:
 
@@ -213,10 +232,11 @@ so a kernel that jumps into the weeds stops immediately with a clear cause.
 | 5 | riscv-tests + CI | ✅ |
 | 6 | S-mode + Sv39 MMU | ✅ |
 | 7 | PLIC + virtio-blk — **boot xv6** | ✅ |
-| 8 | Linux prerequisites (C, F/D, DTB, SBI) | ⬜ next |
-| 9 | **Boot Linux** | ⬜ |
+| 8 | Linux prerequisites (C, F/D, DTB, SBI) | ✅ |
+| 9 | **Boot Linux** | ✅ |
 
-Phase 7 was the milestone: xv6 boots to a shell. Linux is the stretch.
+Phase 7 was the milestone: xv6 boots to a shell. Phase 9 was the stretch, and
+Linux boots too.
 
 [`docs/PHASES.md`](docs/PHASES.md) has the detail behind each phase.
 
@@ -248,6 +268,16 @@ Each phase also ships an explainer alongside its code:
 - [`07-booting-xv6.md`](docs/07-booting-xv6.md) - the claim/complete handshake
   and why it is what keeps a handler from re-entering itself, how a virtqueue
   works, and the two bugs that stood between "runs a kernel" and "boots xv6"
+- [`08-compressed-instructions.md`](docs/08-compressed-instructions.md) - why
+  the C extension is a translation rather than a second execute path, and two
+  bugs in code that had quietly assumed every instruction is four bytes
+- [`08-linux-prerequisites.md`](docs/08-linux-prerequisites.md) - NaN boxing and
+  the one instruction that must not unbox, three places RISC-V and C disagree
+  about floating point, why the device tree is generated rather than written,
+  and what SBI is for
+- [`09-booting-linux.md`](docs/09-booting-linux.md) - four problems between
+  phase 8 and a booting kernel, three of which were absent firmware rather than
+  incorrect emulation
 
 ## Goals
 
