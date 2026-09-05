@@ -43,6 +43,16 @@ Instructions that are not implemented yet raise an illegal-instruction trap
 rather than being silently mis-executed, so a program that needs them fails
 loudly at the exact instruction.
 
+## Quick start
+
+```bash
+./run-all.sh
+```
+
+Builds the project, runs all eleven test suites, then runs the demo and every
+self-test and reports what each produced. Use `--quick` to skip the clean
+rebuild.
+
 ## Build
 
 ```bash
@@ -53,7 +63,7 @@ cmake --build build
 ## Run
 
 ```bash
-# Built-in demo: the OP-IMM instruction group, then a register dump
+# Built-in demo: prints over the UART, then powers the machine off
 ./build/riscv_emu
 
 # One line per retired instruction, on stderr
@@ -71,7 +81,9 @@ cmake --build build
 ./build/riscv_emu build/device_selftest.bin         # prints, then powers off
 ```
 
-`--help` lists all options.
+`--help` lists all options. [`docs/RUNNING.md`](docs/RUNNING.md) is the full
+guide: every flag, how to write and assemble your own guest program, and how to
+read a trace or a stop message when something goes wrong.
 
 ## Test
 
@@ -170,6 +182,8 @@ Each phase ships an explainer alongside the code:
   instruction but past an interrupted one
 - [`03-m-and-a.md`](docs/03-m-and-a.md) - why RISC-V division never traps, and
   why a trap has to break an LR/SC reservation
+[`RUNNING.md`](docs/RUNNING.md) covers how to build, run, test and debug.
+
 - [`04-devices-and-mmio.md`](docs/04-devices-and-mmio.md) - memory-mapped I/O,
   why the timer clock counts instructions rather than seconds, and why interrupt
   pending bits belong to hardware rather than software
