@@ -155,13 +155,48 @@ Result<u64> Uart::load(u64 offset, unsigned size_bytes) {
         case 1:
             return Result<u64>::good(dlab() ? dlm_ : ier_);
         case 2: {
-            // IIR. Bit 0 clear means "an interrupt is pending"; the encoding is
-            // inverted, which is a classic source of confusion.
-            const u8 iir = interrupting() ? 0xc0 : 0xc1;
-            // Reading IIR acknowledges a transmit-empty interrupt. This is what
-            // makes THRE an edge rather than a level that never falls.
-            tx_irq_ = false;
-            return Result<u64>::good(iir);
+            // IIR - "why did you interrupt me?"
+            //
+            // Bit 0 clear means an interrupt is pending; the sense is inverted,
+            // which is a classic source of confusion. But bit 0 is not the
+            // whole answer: **bits 3:1 say which condition caused it**, and a
+            // real driver dispatches on that field rather than going looking.
+            //
+            //   0b000  modem status change
+            //   0b001  transmitter holding register empty
+            //   0b010  received data available
+            //   0b011  receiver line status (overrun, parity, break)
+            //   0b110  character timeout (FIFO has data that has sat too long)
+            //
+            // This used to return a bare 0xc0 for "something happened", whose
+            // ID field is 000 - modem status. Linux's 8250 driver believed it,
+            // read the modem status register, found nothing, and returned
+            // without ever touching the receive buffer. The console printed
+            // perfectly and could not be typed at.
+            //
+            // xv6 never reads IIR at all - it checks LSR and drains - which is
+            // why phase 7 worked with this wrong, and is another instance of a
+            // second, stricter OS finding what the first could not.
+            //
+            // The conditions are prioritised: received data outranks a free
+            // transmitter, because an unread byte will be lost if the next one
+            // arrives and an idle transmitter will still be idle later.
+            u8 cause;
+            if ((ier_ & IER_RX_READY) && !rx_.empty()) {
+                cause = 0x04;          // received data available
+            } else if ((ier_ & IER_TX_EMPTY) && tx_irq_) {
+                cause = 0x02;          // transmitter holding register empty
+                // Reading IIR acknowledges *this* interrupt, and only when it
+                // is the one being reported - which is what makes THRE an edge
+                // rather than a level that never falls.
+                tx_irq_ = false;
+            } else {
+                cause = 0x01;          // bit 0 set: nothing pending
+            }
+
+            // Bits 7:6 set advertise working FIFOs, which is what makes the
+            // driver identify this as a 16550A rather than an earlier part.
+            return Result<u64>::good(static_cast<u8>(0xc0 | cause));
         }
         case 3: return Result<u64>::good(lcr_);
         case 4: return Result<u64>::good(mcr_);
