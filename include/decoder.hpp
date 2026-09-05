@@ -41,11 +41,18 @@ enum class Format {
 // mnemonics so they can be looked up directly in the manual.
 namespace opcodes {
 constexpr u32 LOAD      = 0x03;
+constexpr u32 LOAD_FP   = 0x07;  // F/D: FLW, FLD
 constexpr u32 MISC_MEM  = 0x0f;  // FENCE, FENCE.I
 constexpr u32 OP_IMM    = 0x13;  // ADDI, SLTI, XORI, ORI, ANDI, SLLI, SRLI, SRAI
 constexpr u32 AUIPC     = 0x17;
 constexpr u32 OP_IMM_32 = 0x1b;  // ADDIW, SLLIW, SRLIW, SRAIW
 constexpr u32 STORE     = 0x23;
+constexpr u32 STORE_FP  = 0x27;  // F/D: FSW, FSD
+constexpr u32 MADD      = 0x43;  // F/D: fused multiply-add, four variants
+constexpr u32 MSUB      = 0x47;
+constexpr u32 NMSUB     = 0x4b;
+constexpr u32 NMADD     = 0x4f;
+constexpr u32 OP_FP     = 0x53;  // F/D: all other floating-point operations
 constexpr u32 AMO       = 0x2f;  // A extension
 constexpr u32 OP        = 0x33;  // register-register ALU, plus M extension
 constexpr u32 LUI       = 0x37;
