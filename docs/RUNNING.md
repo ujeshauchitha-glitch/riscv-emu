@@ -428,13 +428,78 @@ Give it time to boot before the input matters:
 
 ---
 
-## 8. Run absolutely everything
+## 8. Boot Linux
+
+```bash
+./scripts/boot-linux.sh
+```
+
+Fetches Linux 6.6, builds it with the stock `defconfig`, builds a static `init`
+into a cpio initramfs, and boots the result. The **first run compiles a kernel**,
+which takes several minutes and a few gigabytes of disk; after that it goes
+straight to booting.
+
+```
+[    0.000000] Linux version 6.6.0 (riscv64-linux-gnu-gcc 13.3.0) #1 SMP
+[    0.000000] SBI specification v0.3 detected
+[    6.540482] 10000000.serial: ttyS0 at MMIO 0x10000000 (irq = 12) is a 16550A
+[    7.138788] virtio_blk virtio0: 1/0/0 default/read/poll queues
+[    9.936166] Run /init as init process
+
+  Linux is running on the riscv-emu emulator.
+
+#
+```
+
+`Ctrl-A` then `x` to leave, as with xv6.
+
+| Option | Meaning |
+|---|---|
+| `--check` | boot, wait for the init process, report and exit |
+| `--rebuild` | rebuild the kernel and initramfs from scratch |
+| `-- ARGS` | everything after `--` goes straight to the emulator |
+
+Reaching the prompt takes a couple of minutes: the emulator runs at roughly 15
+million instructions a second and a defconfig boot is a few billion of them. The
+kernel's own timestamps say about ten seconds, because the guest clock counts
+instructions rather than wall-clock time — a deliberate trade for
+reproducibility, made in phase 4.
+
+### Doing it by hand
+
+```bash
+./build/riscv_emu --linux \
+                  --dram-size-mb 512 \
+                  --max-steps 100000000000 \
+                  --initrd build/initramfs.cpio \
+                  --bootargs "console=ttyS0 earlycon=sbi" \
+                  path/to/Image
+```
+
+`--linux` is what makes this a Linux boot rather than a bare-metal one: it
+generates a device tree, places it in memory, enters the kernel in **supervisor
+mode** with the hart ID in `a0` and the device tree address in `a1`, enables SBI,
+and performs the firmware setup a bootloader would (trap delegation, counter
+access). See [`09-booting-linux.md`](09-booting-linux.md) for why each of those
+is needed.
+
+`--dump-dtb FILE` writes the generated device tree out without booting anything,
+which is useful for inspecting it:
+
+```bash
+./build/riscv_emu --dump-dtb /tmp/machine.dtb
+dtc -I dtb -O dts /tmp/machine.dtb | head -40
+```
+
+---
+
+## 9. Run absolutely everything
 
 ```bash
 ./run-all.sh
 ```
 
-Builds from scratch, runs all fourteen suites, then runs the built-in demo and
+Builds from scratch, runs all sixteen suites, then runs the built-in demo and
 each self-test and reports what each produced. Useful after changing anything,
 and as a single command to check out a fresh clone with.
 
@@ -448,6 +513,6 @@ and as a single command to check out a fresh clone with.
 
 - [`../README.md`](../README.md) — what the project is and where it is going
 - [`PHASES.md`](PHASES.md) — the roadmap and what each phase delivered
-- The numbered design notes (`00-` … `07-`) explain *why* the emulator is built
+- The numbered design notes (`00-` … `09-`) explain *why* the emulator is built
   the way it is. Each records the state at the end of its phase; this page and
   the README always describe the present.

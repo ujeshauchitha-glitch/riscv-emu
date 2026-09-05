@@ -20,7 +20,7 @@ modes. Linux additionally needs the C and F/D extensions, a device tree, and SBI
 | 6 | S-mode + Sv39 MMU | ✅ done |
 | 7 | PLIC + virtio-blk — **boot xv6** | ✅ done |
 | 8 | Linux prerequisites (C, F/D, DTB, SBI) | ✅ done |
-| 9 | **Boot Linux** | 🔨 in progress |
+| 9 | **Boot Linux** | ✅ done |
 
 The first three phases were numbered before the roadmap existed. Phase 0 is
 numbered as it is because it is foundational work that logically precedes the
@@ -433,3 +433,47 @@ timer handler every instruction - which looks exactly like a hang.
 **125/125 riscv-tests**, now including `rv64uf` 11/11 and `rv64ud` 12/12.
 
 **Docs:** [`08-linux-prerequisites.md`](08-linux-prerequisites.md)
+
+## Phase 9: Linux boots — done
+
+An unmodified Linux 6.6 kernel, stock `defconfig`, boots to a user process.
+
+```
+[    0.000000] SBI specification v0.3 detected
+[    0.000000] riscv: base ISA extensions acdfim
+[    6.540482] 10000000.serial: ttyS0 at MMIO 0x10000000 (irq = 12) is a 16550A
+[    7.138788] virtio_blk virtio0: 1/0/0 default/read/poll queues
+[    9.936166] Run /init as init process
+
+  Linux is running on the riscv-emu emulator.
+```
+
+**Four problems stood between phase 8 and this, and three of them were not
+emulator bugs at all** - they were missing firmware. The emulator was behaving
+exactly as the spec says a bare hart should; what was absent was the layer that
+normally sits underneath a kernel and arranges things on its behalf.
+
+- **No `medeleg`/`mideleg`.** Linux enables paging by writing `satp` and letting
+  the *next fetch* fault onto a virtual-address continuation it has already
+  installed in `stvec`. That depends on the fault reaching supervisor mode; with
+  no delegation it went to `mtvec` = 0 and looped forever. The symptom was an
+  instruction trace that stopped at the `satp` write and never advanced - which
+  is itself the clue, since a trace only stops when every *fetch* is faulting.
+- **No `mcounteren`.** `rdtime` is an ordinary instruction to a kernel (`udelay`
+  is built on it) but reading a counter from a lower privilege level is illegal
+  unless the level above enables it.
+- **The SBI timer expired into nothing.** `mtimecmp` raises MTIP, a *machine*
+  interrupt, which a supervisor cannot enable - so jiffies never advanced and
+  every sleep would have hung forever. Real firmware posts STIP in its place.
+- **virtio was not a modern device.** It reported `VERSION = 2` but never
+  offered `VIRTIO_F_VERSION_1`, which Linux refuses outright. The bit is number
+  32, so it is only reachable if the device honours `DeviceFeaturesSel` - which
+  it did not. xv6 never checks, which is why phase 7 was unaffected, and why
+  booting a second stricter OS was worth the trouble.
+
+**Added:** `scripts/boot-linux.sh` (fetch, build, initramfs, boot in one
+command), `examples/initramfs/init.c`, and RISC-V `Image` header parsing so a
+flat kernel is placed at `DRAM_BASE + text_offset` rather than at the start of
+DRAM.
+
+**Docs:** [`09-booting-linux.md`](09-booting-linux.md)
