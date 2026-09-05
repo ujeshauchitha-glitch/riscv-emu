@@ -282,43 +282,16 @@ or clear `mtvec` before the `ebreak`, as `examples/trap_selftest.S` does.
 xv6 is a small Unix-like teaching OS from MIT, and booting it is what this
 emulator was built for.
 
-### Build it
-
-xv6's stock build targets `-march=rv64gc`. The `c` there is the compressed
-16-bit instruction extension, which this emulator does not implement yet
-(phase 8), and `g` pulls in floating point as well. Build it for the extensions
-the emulator does have:
+### One command
 
 ```bash
-git clone https://github.com/mit-pdos/xv6-riscv
-cd xv6-riscv
-make CFLAGS_EXTRA='-march=rv64ima_zicsr_zifencei -mabi=lp64' \
-     kernel/kernel fs.img
+./scripts/boot-xv6.sh
 ```
 
-You need the same `riscv64-unknown-elf` (or `riscv64-linux-gnu`) toolchain the
-self-tests use. To confirm the kernel really is free of compressed instructions
-before trying to boot it — every compressed instruction is a 16-bit halfword, so
-a `.c.`-prefixed mnemonic in the disassembly is the thing to look for:
-
-```bash
-riscv64-unknown-elf-objdump -d kernel/kernel | grep -c $'\tc\.'
-# 0
-```
-
-A non-zero count means the build picked up the stock `-march` somewhere; check
-that `CFLAGS_EXTRA` reached every compilation unit, and `make clean` first.
-
-### Boot it
-
-```bash
-./build/riscv_emu --disk path/to/xv6-riscv/fs.img \
-                  path/to/xv6-riscv/kernel/kernel
-```
-
-The kernel is an ELF64 image, so the loader places it by its program headers;
-`--disk` backs the virtio block device with the filesystem image. After a few
-seconds:
+That fetches xv6 into `third_party/` on first run, builds it for the extensions
+this emulator implements, checks the result really is free of compressed
+instructions, builds the emulator if it is not built already, and boots it with
+the filesystem image attached. After about half a minute:
 
 ```
 xv6 kernel is booting
@@ -327,25 +300,110 @@ init: starting sh
 $
 ```
 
-That prompt is live — type at it. `ls`, `cat README`, `echo hi`, `wc README`
-all work, and `usertests` runs the full xv6 test suite (slowly: it is tens of
-billions of instructions, so raise `--max-steps`).
+The prompt is **live** — type at it.
 
-The default step budget of 100 million is far too small for a boot — xv6 reaches
-the shell at roughly 500 million instructions. Pass a real budget:
-
-```bash
-./build/riscv_emu --disk fs.img --max-steps 100000000000 kernel/kernel
+```
+$ ls
+$ cat README
+$ echo hello
+$ wc README
+$ usertests          # the full xv6 test suite; takes a long while
 ```
 
-### Drive it from a script
+**To leave: press Ctrl-A then X.** Not Ctrl-C — the console is in raw mode, so
+Ctrl-C is delivered to the guest shell, which is the whole point of raw mode.
+The emulator keeps `Ctrl-A` as an escape prefix, the same one screen, tmux and
+QEMU use:
+
+| | |
+|---|---|
+| `Ctrl-A` `x` | leave the emulator |
+| `Ctrl-A` `Ctrl-A` | send a literal Ctrl-A to the guest |
+
+### Script options
+
+| Option | Meaning |
+|---|---|
+| `--check` | boot, run `ls`, print the result and exit — no interactive shell |
+| `--rebuild` | rebuild xv6 from scratch even if it is already built |
+| `-- ARGS` | everything after `--` goes straight to the emulator |
+| `--help` | the same list |
+
+`--check` is the quickest way to confirm the whole stack works, and it is
+scriptable:
+
+```bash
+./scripts/boot-xv6.sh --check && echo "it boots"
+```
+
+To trace a boot — a boot retires hundreds of millions of instructions, so send
+it to a file and look at the tail, not the head:
+
+```bash
+./scripts/boot-xv6.sh -- --trace 2> /tmp/boot.log
+```
+
+### Doing it by hand
+
+The script is a convenience; nothing about it is required.
+
+xv6's stock build targets `-march=rv64gc`. The `c` there is the compressed
+16-bit instruction extension, which this emulator does not implement yet
+(phase 8), and `g` pulls in floating point as well. It has to be built for the
+extensions the emulator does have — and there is **no make variable for that**.
+The Makefile hardcodes `-march=rv64gc` into `CFLAGS`, and its rule for assembly
+files spells out `$(CC) -march=rv64gc` without including `$(CFLAGS)` at all, so
+`entry.S`, `swtch.S`, `kernelvec.S` and `trampoline.S` would still be assembled
+as `rv64gc` even if the C half were overridden. Patch both occurrences:
+
+```bash
+git clone https://github.com/mit-pdos/xv6-riscv
+cd xv6-riscv
+sed -i 's/-march=rv64gc/-march=rv64ima_zicsr_zifencei -mabi=lp64/g' Makefile
+make kernel/kernel fs.img
+```
+
+You need the same `riscv64-unknown-elf` (or `riscv64-linux-gnu`) toolchain the
+self-tests use.
+
+To confirm the kernel really is free of compressed instructions before trying to
+boot it:
+
+```bash
+riscv64-unknown-elf-objdump -d -M no-aliases kernel/kernel | grep -c $'\tc\.'
+# 0
+```
+
+**The `-M no-aliases` is not optional.** Without it objdump prints a compressed
+instruction under its expanded name — `c.lui` shows up as plain `lui` — so the
+search finds nothing and the check passes happily on a kernel that is five
+thousand compressed instructions deep. Then the emulator stops on the third
+instruction of `_entry` and the reason is not obvious at all.
+
+A non-zero count means the build picked up the stock `-march` somewhere; check
+the patch applied to both lines, and `make clean` first.
+
+Then boot it. The kernel is an ELF64 image, so the loader places it by its
+program headers; `--disk` backs the virtio block device with the filesystem
+image:
+
+```bash
+./build/riscv_emu --disk fs.img --max-steps 1000000000000 kernel/kernel
+```
+
+The default step budget of 100 million is far too small — xv6 reaches the shell
+at roughly 500 million instructions, about 35 seconds at the emulator's ~15M
+instructions per second. Without a raised `--max-steps` the run stops partway
+through boot with `step budget exhausted`.
+
+### Driving it from a script
 
 Standard input is the console's receive line, so the shell can be piped to.
 Give it time to boot before the input matters:
 
 ```bash
-(printf 'ls\n'; sleep 20) | ./build/riscv_emu --disk fs.img \
-    --max-steps 900000000 kernel/kernel
+(sleep 40; printf 'ls\n'; sleep 20) | \
+  ./build/riscv_emu --disk fs.img --max-steps 900000000 kernel/kernel
 ```
 
 ### If it stops instead of booting
@@ -355,9 +413,7 @@ Give it time to boot before the input matters:
 | `illegal instruction` early, at a low address | the kernel was built with `c` or `f`/`d` after all |
 | `step budget exhausted` before the prompt | `--max-steps` too small; xv6 needs ~500M to reach the shell |
 | a fault right after `virtio_disk_init` | no `--disk`, or an unreadable image |
-
-`--trace` works here too, but a boot retires hundreds of millions of
-instructions — redirect it to a file and look at the tail, not the head.
+| nothing at all, for a long time | normal — the first message appears a few seconds in |
 
 ---
 
