@@ -38,7 +38,7 @@ Phase 8 built the four things Linux needs that xv6 does not — compressed
 instructions, floating point, a device tree, and SBI. With all of them in place
 the kernel got exactly nowhere: not one character of output.
 
-Four problems stood in the way, and the interesting thing is that **three of
+Five problems stood in the way, and the interesting thing is that **three of
 them were not bugs in the emulator at all**. They were missing *firmware*.
 
 ### 1. Nobody had delegated the traps
@@ -123,6 +123,55 @@ invisible even after setting it.
 
 xv6 never checks this, which is why phase 7 worked without it — and is a neat
 demonstration of why booting a second, stricter OS is worth the trouble.
+
+### 5. The UART said *that* it interrupted, not *why*
+
+With the kernel booted, the console printed perfectly and could not be typed
+at. Instrumenting the path showed the PLIC delivering IRQ 10 and Linux claiming
+it — and then nothing.
+
+`IIR` was returning a bare `0xc0` for "an interrupt is pending". Bit 0 clear
+does mean that, and the inverted sense is the part everyone remembers. But bits
+3:1 say **which** condition caused it, and a real driver dispatches on that
+field:
+
+```
+0b000  modem status change
+0b001  transmitter holding register empty
+0b010  received data available
+0b011  receiver line status
+0b110  character timeout
+```
+
+`0xc0` leaves that field at `000`. So Linux's 8250 driver, told a modem status
+change, read the modem status register, found nothing to do, and returned
+without ever touching the receive buffer.
+
+xv6 never reads IIR at all — it checks LSR and drains — which is why this was
+invisible for a whole phase. The same pattern as virtio: the first OS was not
+strict enough to notice.
+
+With that fixed the console is fully interactive:
+
+```
+# 9.96 0.00
+
+#            CPU0
+ 11:       2494  RISC-V INTC   5 Edge      riscv-timer
+ 12:         10  SiFive PLIC  10 Edge      ttyS0
+ 13:          0  SiFive PLIC   1 Edge      virtio0
+
+# powering off
+[   10.134004] reboot: Power down
+
+guest requested shutdown through SBI, after 120467864 instruction(s)
+```
+
+That `/proc/interrupts` is worth reading closely, because it is the machine
+reporting on itself: 2494 timer interrupts arriving through the SBI forwarding
+described above, 10 UART interrupts arriving through the PLIC, and virtio
+registered on IRQ 1. `uptime` proves the clock advances. `poweroff` leaves
+through SBI's system-reset call and stops the emulator.
 
 ---
 
