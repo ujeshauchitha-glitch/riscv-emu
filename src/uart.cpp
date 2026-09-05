@@ -73,10 +73,29 @@ void Uart::poll_host_input() {
     // Bounded so that a large paste cannot starve the guest: the receive queue
     // is drained one byte per RBR read, and a driver with no FIFO handles a few
     // dozen bytes between polls comfortably.
+    constexpr u8 CTRL_A = 0x01;
+
     char buf[64];
     const ssize_t n = ::read(STDIN_FILENO, buf, sizeof buf);
     if (n > 0) {
-        for (ssize_t i = 0; i < n; ++i) rx_.push_back(static_cast<u8>(buf[i]));
+        for (ssize_t i = 0; i < n; ++i) {
+            const u8 c = static_cast<u8>(buf[i]);
+
+            if (escape_armed_) {
+                escape_armed_ = false;
+                if (c == 'x' || c == 'X') { exit_requested_ = true; return; }
+                if (c == CTRL_A) { rx_.push_back(CTRL_A); continue; }
+                // Not a sequence we know. Give the guest both bytes rather than
+                // swallowing the prefix - a guest program that wanted Ctrl-A
+                // followed by something else should still get it.
+                rx_.push_back(CTRL_A);
+                rx_.push_back(c);
+                continue;
+            }
+
+            if (c == CTRL_A) { escape_armed_ = true; continue; }
+            rx_.push_back(c);
+        }
     } else if (n == 0) {
         // End of input. Stop polling: a closed stdin stays readable and would
         // otherwise return 0 forever, once per poll.

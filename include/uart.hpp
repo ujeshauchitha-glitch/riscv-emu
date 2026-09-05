@@ -64,6 +64,20 @@ public:
     // call it periodically. No-op unless attach_host_stdin() succeeded.
     void poll_host_input();
 
+    // True once the user has asked to leave, with Ctrl-A X.
+    //
+    // Raw mode hands every keystroke to the guest, Ctrl-C included - that is
+    // the point of it, since a guest shell needs Ctrl-C to interrupt a guest
+    // program. But it also means the usual ways out of a terminal program are
+    // gone, and an emulator you cannot quit is a bad emulator. So the console
+    // keeps one escape prefix for itself, the same Ctrl-A that screen, tmux and
+    // QEMU use:
+    //
+    //   Ctrl-A x        leave the emulator
+    //   Ctrl-A Ctrl-A   send a literal Ctrl-A to the guest
+    //   Ctrl-A <other>  passed through unchanged, prefix and all
+    bool exit_requested() const { return exit_requested_; }
+
     ~Uart() override;
 
     // True when the guest should see an interrupt. Wired to the PLIC in phase 7;
@@ -100,6 +114,8 @@ private:
     // is only meaningful when `restore_termios_` is true (stdin was a tty).
     bool  host_stdin_    = false;
     bool  host_stdin_eof_ = false;
+    bool  escape_armed_  = false;   // the last byte read was the Ctrl-A prefix
+    bool  exit_requested_ = false;
     bool  restore_termios_ = false;
     void* saved_termios_ = nullptr;  // struct termios, hidden to keep the header clean
 };

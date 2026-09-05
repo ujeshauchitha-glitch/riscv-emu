@@ -231,6 +231,8 @@ int main(int argc, char** argv) {
             std::cerr << "\nFAIL: test " << code << " failed, after " << retired
                       << " instruction(s)\n";
         }
+    } else if (cpu.user_quit) {
+        std::cerr << "\nleft the machine after " << retired << " instruction(s)\n";
     } else if (cpu.halted) {
         std::cerr << "\nmachine powered off after " << retired << " instruction(s)";
         if (syscon->exit_code() != 0) std::cerr << " (exit code " << syscon->exit_code() << ")";
@@ -250,6 +252,7 @@ int main(int argc, char** argv) {
     if (cpu.htif_tohost_value != 0) {
         return (cpu.htif_tohost_value >> 1) == 0 ? 0 : 1;
     }
+    if (cpu.user_quit) return 0;
     if (cpu.halted) return static_cast<int>(syscon->exit_code());
     return st ? 0 : 1;
 }

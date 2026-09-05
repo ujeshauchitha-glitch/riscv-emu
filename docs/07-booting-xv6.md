@@ -299,27 +299,75 @@ Same delegation decision `enter_trap()` makes, one line earlier.
 
 ## Building and booting xv6
 
-xv6's stock build targets `-march=rv64gc`, and `g` implies `f`/`d` (floating
-point) while `c` means compressed 16-bit instructions. Its kernel contains
+```bash
+./scripts/boot-xv6.sh
+```
+
+That fetches xv6, builds it correctly, verifies the build, and boots it.
+`docs/RUNNING.md` section 7 documents its options. What it has to do, and why,
+is worth spelling out — both halves of it are traps.
+
+### The `-march` problem
+
+xv6's stock build targets `-march=rv64gc`, where `g` implies `f`/`d` (floating
+point) and `c` means compressed 16-bit instructions. Its kernel contains
 **5,253 compressed instructions**, none of which this emulator can decode yet —
-that is phase 8. Rebuilding with the extensions this emulator implements yields
-zero:
+that is phase 8.
 
-```bash
-git clone https://github.com/mit-pdos/xv6-riscv
-cd xv6-riscv
-make CFLAGS_EXTRA='-march=rv64ima_zicsr_zifencei -mabi=lp64' \
-     kernel/kernel fs.img
+The obvious fix is to pass a different `-march` on the make command line. There
+is no variable for it. The Makefile hardcodes `-march=rv64gc` into `CFLAGS`, and
+— the part that actually bites — its rule for assembly files is:
+
+```make
+$K/%.o: $K/%.S
+	$(CC) -march=rv64gc -g $(DETFLAGS) -c -o $@ $<
 ```
 
-Then:
+No `$(CFLAGS)` at all. So even a Makefile that *did* honour an override for C
+would still assemble `entry.S`, `swtch.S`, `kernelvec.S` and `trampoline.S` as
+`rv64gc`. `entry.S` is the first code that runs, and its third instruction is a
+`c.lui`.
+
+So the two occurrences get patched directly:
 
 ```bash
-./build/riscv_emu --disk path/to/fs.img path/to/kernel/kernel
+sed -i 's/-march=rv64gc/-march=rv64ima_zicsr_zifencei -mabi=lp64/g' Makefile
+make kernel/kernel fs.img
 ```
 
-`docs/RUNNING.md` has the full recipe, including how to check that a build
-really is free of compressed instructions before you try to boot it.
+### The verification problem
+
+Having patched it, you want to *check*. The obvious check is to disassemble and
+look for `c.`-prefixed mnemonics:
+
+```bash
+riscv64-unknown-elf-objdump -d kernel/kernel | grep -c $'\tc\.'
+# 0
+```
+
+That reports zero on a kernel with 5,253 of them. `objdump` prints compressed
+instructions under their expanded names by default — `c.lui` renders as plain
+`lui` — so the pattern never matches and the check passes on anything. It has to
+be:
+
+```bash
+riscv64-unknown-elf-objdump -d -M no-aliases kernel/kernel | grep -c $'\tc\.'
+```
+
+Both of these were live bugs in the first version of `scripts/boot-xv6.sh`: the
+build silently produced an `rv64gc` kernel, the check silently blessed it, and
+the emulator stopped on the third instruction of `_entry` with an
+illegal-instruction trap at `0x80000008` — which tells you nothing about either
+cause. A check that cannot fail is worse than no check, because it is evidence.
+
+Then, by hand:
+
+```bash
+./build/riscv_emu --disk fs.img --max-steps 1000000000000 kernel/kernel
+```
+
+The step budget matters: the default 100 million stops the run partway through
+boot, since xv6 reaches the shell at roughly 500 million instructions.
 
 ### CSRs xv6 needed that earlier phases had not implemented
 

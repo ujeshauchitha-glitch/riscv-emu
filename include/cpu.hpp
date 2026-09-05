@@ -120,6 +120,11 @@ public:
     // Set when a syscon poweroff or reboot stops the run.
     bool halted = false;
 
+    // Set when the run stopped because the user pressed Ctrl-A X, rather than
+    // because the guest asked to power off. Both set `halted`; only this
+    // distinguishes "you quit" from "the machine shut down".
+    bool user_quit = false;
+
     // HTIF: the address of a `tohost` word to watch, or 0 to watch nothing.
     //
     // The riscv-tests suite reports its result by writing here and spinning,
