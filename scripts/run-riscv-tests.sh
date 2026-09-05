@@ -25,16 +25,18 @@ EMU="build/riscv_emu"
 
 # Suites the emulator can run today. rv64si needs supervisor mode (phase 6) and
 # rv64uf/rv64ud need floating point (phase 8), so they are deliberately absent.
-DEFAULT_SUITES="rv64ui rv64um rv64ua rv64mi rv64si rv64uc"
+DEFAULT_SUITES="rv64ui rv64um rv64ua rv64mi rv64si rv64uc rv64uf rv64ud"
 SUITES="${*:-$DEFAULT_SUITES}"
 
-# The ISA string each suite is built with. rv64uc is the compressed-instruction
-# suite, so it needs `c` in the -march; the rest are deliberately built without
-# it, so that a failure there is never confounded by the decompressor.
+# The ISA string each suite is built with. Each suite gets exactly the
+# extensions it tests and no more, so that a failure in one is never confounded
+# by a bug in another - a compressed-instruction bug should not be able to break
+# rv64ui, and a decompressor bug should show up only in rv64uc.
 march_for_suite() {
   case "$1" in
-    rv64uc) echo "rv64imac_zicsr_zifencei" ;;
-    *)      echo "rv64ima_zicsr_zifencei" ;;
+    rv64uc)         echo "rv64imac_zicsr_zifencei" ;;
+    rv64uf|rv64ud)  echo "rv64imafd_zicsr_zifencei" ;;
+    *)              echo "rv64ima_zicsr_zifencei" ;;
   esac
 }
 

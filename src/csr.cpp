@@ -24,17 +24,19 @@ constexpr u64 MSTATUS_MASK =
     csr::MSTATUS_MIE | csr::MSTATUS_MPIE | csr::MSTATUS_MPP |
     csr::MSTATUS_SIE | csr::MSTATUS_SPIE | csr::MSTATUS_SPP |
     csr::MSTATUS_MPRV | csr::MSTATUS_SUM | csr::MSTATUS_MXR |
-    csr::MSTATUS_TVM | csr::MSTATUS_TW | csr::MSTATUS_TSR;
+    csr::MSTATUS_TVM | csr::MSTATUS_TW | csr::MSTATUS_TSR |
+    csr::MSTATUS_FS;
 
 }  // namespace
 
 CsrFile::CsrFile() {
-    // misa advertises the ISA. F/D join later in phase 8. Guest code reads this
-    // to decide what it may use, so it must not claim more than we deliver.
+    // misa advertises the ISA. Guest code reads this to decide what it may use,
+    // so it must not claim more than we deliver.
     // 'S' and 'U' announce that supervisor and user mode exist. A kernel checks
     // misa before trying to drop privilege.
     raw_[csr::MISA] = MISA_MXL_64 | misa_ext('I') | misa_ext('M') | misa_ext('A') |
-                      misa_ext('C') | misa_ext('S') | misa_ext('U');
+                      misa_ext('C') | misa_ext('F') | misa_ext('D') |
+                      misa_ext('S') | misa_ext('U');
 
     // A single hart, numbered 0. Every RISC-V system must have a hart 0, and
     // kernels use mhartid to pick which core runs the boot path.
@@ -90,6 +92,10 @@ bool CsrFile::exists(u32 addr) const {
         case csr::MENVCFG:
         case csr::PMPCFG0:
         case csr::PMPCFG2:
+        // Floating point. All three are windows onto one register; see read().
+        case csr::FFLAGS:
+        case csr::FRM:
+        case csr::FCSR:
             return true;
 
         // Physical memory protection.
@@ -116,7 +122,26 @@ u64 CsrFile::read(u32 addr) const {
         // The supervisor views. Reading sstatus reads the *same bits* as
         // mstatus, with the machine-only ones masked out - there is no second
         // copy that could drift out of step with the first.
-        case csr::SSTATUS: return raw_[csr::MSTATUS] & csr::SSTATUS_MASK;
+        case csr::SSTATUS: return read(csr::MSTATUS) & csr::SSTATUS_MASK;
+
+        // mstatus.SD is a read-only summary of the floating-point state: set
+        // exactly when FS is Dirty. A context switch reads one bit instead of
+        // picking apart a field. It is derived rather than stored, so it can
+        // never disagree with the field it summarises.
+        case csr::MSTATUS: {
+            const u64 status = raw_[csr::MSTATUS];
+            return (status & csr::MSTATUS_FS) == csr::MSTATUS_FS_DIRTY
+                       ? (status | csr::MSTATUS_SD)
+                       : (status & ~csr::MSTATUS_SD);
+        }
+
+        // fcsr is the whole register; fflags and frm are its two halves. They
+        // are windows, not copies - writing frm must not disturb the accrued
+        // exception flags, and a routine that saves and restores fcsr must get
+        // both back.
+        case csr::FCSR:   return raw_[csr::FCSR];
+        case csr::FFLAGS: return raw_[csr::FCSR] & csr::FCSR_FFLAGS_MASK;
+        case csr::FRM:    return (raw_[csr::FCSR] & csr::FCSR_FRM_MASK) >> csr::FCSR_FRM_SHIFT;
         case csr::SIE:     return raw_[csr::MIE] & csr::SIE_SIP_MASK;
         case csr::SIP:     return raw_[csr::MIP] & csr::SIE_SIP_MASK;
 
@@ -168,6 +193,19 @@ void CsrFile::write(u32 addr, u64 value) {
             raw_[a] = (value & ~csr::MTVEC_MODE_MASK) | mode;
             return;
         }
+
+        case csr::FCSR:
+            // Bits above [7:0] are reserved and read as zero.
+            raw_[csr::FCSR] = value & (csr::FCSR_FFLAGS_MASK | csr::FCSR_FRM_MASK);
+            return;
+        case csr::FFLAGS:
+            raw_[csr::FCSR] = (raw_[csr::FCSR] & ~csr::FCSR_FFLAGS_MASK) |
+                              (value & csr::FCSR_FFLAGS_MASK);
+            return;
+        case csr::FRM:
+            raw_[csr::FCSR] = (raw_[csr::FCSR] & ~csr::FCSR_FRM_MASK) |
+                              ((value << csr::FCSR_FRM_SHIFT) & csr::FCSR_FRM_MASK);
+            return;
 
         // Writing a supervisor view writes through to the machine register,
         // touching only the bits that view exposes.

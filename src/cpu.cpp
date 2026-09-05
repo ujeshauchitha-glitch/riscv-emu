@@ -1,5 +1,11 @@
 #include "cpu.hpp"
 
+#include <cmath>
+#include <limits>
+
+#include "fpu.hpp"
+#include "sbi.hpp"
+
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
@@ -400,6 +406,15 @@ Status Cpu::execute(const DecodedInst& inst) {
         case opcodes::AMO:       return execute_amo(inst);
         case opcodes::SYSTEM:    return execute_system(inst);
 
+        // F and D.
+        case opcodes::LOAD_FP:   return execute_load_fp(inst);
+        case opcodes::STORE_FP:  return execute_store_fp(inst);
+        case opcodes::OP_FP:     return execute_op_fp(inst);
+        case opcodes::MADD:
+        case opcodes::MSUB:
+        case opcodes::NMSUB:
+        case opcodes::NMADD:     return execute_fused_madd(inst);
+
         // FENCE orders memory operations for other harts and devices. We are a
         // single-hart emulator that executes strictly in order and completes
         // every access before the next instruction, so the ordering FENCE asks
@@ -470,6 +485,435 @@ Status Cpu::execute_jalr(const DecodedInst& inst) {
     // rs1 may be the same register - `jalr ra, ra, 0` is a real idiom.
     write_reg(inst.rd, link);
     return Status::good();
+}
+
+
+// ===========================================================================
+// F and D: floating point.
+// ===========================================================================
+
+Status Cpu::require_fpu() const {
+    // mstatus.FS == Off means the floating-point unit is disabled, and every
+    // instruction that touches it is illegal. This is not an optional check: a
+    // kernel that does not save the f registers across a context switch turns
+    // FS off precisely so that user code cannot use them, and an emulator that
+    // ignored it would let two processes silently share a register file.
+    if (!csrs.fpu_enabled()) return Status::bad(Exception::IllegalInstruction, 0);
+    return Status::good();
+}
+
+void Cpu::write_freg(u32 index, u64 value) {
+    fregs[index] = value;
+    // Writing any f register makes the unit Dirty, which is what tells a
+    // context switch it has 32 registers to save.
+    csrs.mark_fpu_dirty();
+}
+
+template <typename Op>
+Status Cpu::with_rounding(const DecodedInst& inst, Op&& op) {
+    // The rounding mode comes from the instruction's rm field, or from fcsr
+    // when that field says DYN. A reserved mode makes the instruction illegal
+    // rather than defaulting to something plausible - software that asks for a
+    // mode that does not exist has a bug, and hiding it helps nobody.
+    RoundingScope rounding(inst.funct3, csrs.rounding_mode());
+    if (!rounding.valid()) {
+        return Status::bad(Exception::IllegalInstruction, inst.encoded);
+    }
+
+    clear_host_exceptions();
+    op();
+    csrs.raise_fflags(take_host_exceptions());
+    return Status::good();
+}
+
+Status Cpu::execute_load_fp(const DecodedInst& inst) {
+    Status fp = require_fpu();
+    if (!fp) return Status::bad(Exception::IllegalInstruction, inst.encoded);
+
+    const u64 addr = read_reg(inst.rs1) + static_cast<u64>(inst.imm);
+
+    switch (inst.funct3) {
+        case 0x2: {  // FLW
+            Result<u64> v = mem_load(addr, 4, AccessType::Load);
+            if (!v) return Status::bad(v.trap);
+            // Boxed on the way in, so that reading this register as a double
+            // yields a NaN rather than a plausible-looking wrong number.
+            write_freg(inst.rd, nan_box(static_cast<u32>(v.value)));
+            return Status::good();
+        }
+        case 0x3: {  // FLD
+            Result<u64> v = mem_load(addr, 8, AccessType::Load);
+            if (!v) return Status::bad(v.trap);
+            write_freg(inst.rd, v.value);
+            return Status::good();
+        }
+        default:
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
+    }
+}
+
+Status Cpu::execute_store_fp(const DecodedInst& inst) {
+    Status fp = require_fpu();
+    if (!fp) return Status::bad(Exception::IllegalInstruction, inst.encoded);
+
+    const u64 addr = read_reg(inst.rs1) + static_cast<u64>(inst.imm);
+
+    switch (inst.funct3) {
+        case 0x2:  // FSW - the low half only; the box is not stored
+            return mem_store(addr, 4, fregs[inst.rs2] & 0xffffffffull);
+        case 0x3:  // FSD
+            return mem_store(addr, 8, fregs[inst.rs2]);
+        default:
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
+    }
+}
+
+namespace {
+
+// FMIN/FMAX have semantics that are neither C's fmin/fmax nor a comparison:
+//
+//   - a signalling NaN in either operand raises Invalid,
+//   - if one operand is NaN the result is the *other* operand,
+//   - if both are NaN the result is the canonical NaN,
+//   - and -0.0 is defined to be less than +0.0, which no comparison reports.
+//
+// Writing this out is shorter than explaining why std::fmin is wrong.
+template <typename T>
+T fmin_max(T a, T b, bool want_max, bool a_nan, bool b_nan, bool a_neg_zero,
+           bool b_neg_zero) {
+    if (a_nan && b_nan) return T{};                 // caller substitutes NaN
+    if (a_nan) return b;
+    if (b_nan) return a;
+    if (a == b && (a_neg_zero || b_neg_zero)) {
+        // Both zeros. The sign decides, and only for zeros does a == b while
+        // the two values are still distinguishable.
+        const bool pick_positive = want_max;
+        if (a_neg_zero && b_neg_zero) return a;
+        if (pick_positive) return a_neg_zero ? b : a;
+        return a_neg_zero ? a : b;
+    }
+    if (want_max) return a > b ? a : b;
+    return a < b ? a : b;
+}
+
+// Convert a float to an integer with RISC-V's out-of-range behaviour, which is
+// *not* C's. C says an out-of-range conversion is undefined; RISC-V says it
+// saturates to the largest or smallest representable value and raises Invalid.
+// A NaN converts to the maximum positive value, not to zero.
+template <typename Int, typename Float>
+Int convert_to_int(Float value, bool& invalid) {
+    invalid = false;
+    if (std::isnan(value)) {
+        invalid = true;
+        return std::numeric_limits<Int>::max();
+    }
+    // Compare against the exact bounds as long doubles so that the comparison
+    // itself does not round the limit into range.
+    const long double v   = static_cast<long double>(value);
+    const long double lo  = static_cast<long double>(std::numeric_limits<Int>::min());
+    const long double hi  = static_cast<long double>(std::numeric_limits<Int>::max());
+    if (v < lo) { invalid = true; return std::numeric_limits<Int>::min(); }
+    // `hi` may round up when converted, so the test has to be >= the next
+    // representable value above the maximum rather than > the maximum.
+    if (v >= hi + 1.0L) { invalid = true; return std::numeric_limits<Int>::max(); }
+    if (v > hi) { invalid = true; return std::numeric_limits<Int>::max(); }
+    return static_cast<Int>(v);
+}
+
+}  // namespace
+
+Status Cpu::execute_op_fp(const DecodedInst& inst) {
+    Status fp = require_fpu();
+    if (!fp) return Status::bad(Exception::IllegalInstruction, inst.encoded);
+
+    // funct7's low bit selects the precision: 0 single, 1 double. The rest of
+    // funct7 names the operation.
+    const u32  op       = inst.funct7 >> 2;
+    const bool is_double = (inst.funct7 & 0x3) == 0x1;
+    if ((inst.funct7 & 0x3) > 0x1) {
+        // fmt 2 and 3 are half and quad precision, which we do not implement.
+        return Status::bad(Exception::IllegalInstruction, inst.encoded);
+    }
+
+    const u64 a_bits = fregs[inst.rs1];
+    const u64 b_bits = fregs[inst.rs2];
+    const double a_d = bits_to_f64(a_bits);
+    const double b_d = bits_to_f64(b_bits);
+    const float  a_f = bits_to_f32(nan_unbox(a_bits));
+    const float  b_f = bits_to_f32(nan_unbox(b_bits));
+
+    auto store_f64 = [&](double v) {
+        write_freg(inst.rd, std::isnan(v) ? CANONICAL_NAN_F64 : f64_to_bits(v));
+    };
+    auto store_f32 = [&](float v) {
+        write_freg(inst.rd,
+                   nan_box(std::isnan(v) ? CANONICAL_NAN_F32 : f32_to_bits(v)));
+    };
+
+    switch (op) {
+        case 0x00:  // FADD
+            return with_rounding(inst, [&] {
+                if (is_double) store_f64(a_d + b_d); else store_f32(a_f + b_f);
+            });
+        case 0x01:  // FSUB
+            return with_rounding(inst, [&] {
+                if (is_double) store_f64(a_d - b_d); else store_f32(a_f - b_f);
+            });
+        case 0x02:  // FMUL
+            return with_rounding(inst, [&] {
+                if (is_double) store_f64(a_d * b_d); else store_f32(a_f * b_f);
+            });
+        case 0x03:  // FDIV
+            return with_rounding(inst, [&] {
+                if (is_double) store_f64(a_d / b_d); else store_f32(a_f / b_f);
+            });
+        case 0x0b:  // FSQRT
+            if (inst.rs2 != 0) {
+                return Status::bad(Exception::IllegalInstruction, inst.encoded);
+            }
+            return with_rounding(inst, [&] {
+                if (is_double) store_f64(std::sqrt(a_d));
+                else           store_f32(std::sqrt(a_f));
+            });
+
+        case 0x04: {  // FSGNJ / FSGNJN / FSGNJX - sign injection
+            // These are bit manipulation, not arithmetic: they never round,
+            // never raise a flag, and never treat a NaN specially. That is what
+            // makes them the canonical way to write fabs (FSGNJX rd, rs, rs),
+            // fneg (FSGNJN) and a register move (FSGNJ rd, rs, rs).
+            const u64 sign_bit = is_double ? (1ull << 63) : (1ull << 31);
+            const u64 a = is_double ? a_bits : nan_unbox(a_bits);
+            const u64 b = is_double ? b_bits : nan_unbox(b_bits);
+            u64 sign;
+            switch (inst.funct3) {
+                case 0x0: sign = b & sign_bit; break;                  // FSGNJ
+                case 0x1: sign = (~b) & sign_bit; break;               // FSGNJN
+                case 0x2: sign = (a ^ b) & sign_bit; break;            // FSGNJX
+                default:
+                    return Status::bad(Exception::IllegalInstruction, inst.encoded);
+            }
+            const u64 result = (a & ~sign_bit) | sign;
+            write_freg(inst.rd, is_double ? result : nan_box(static_cast<u32>(result)));
+            return Status::good();
+        }
+
+        case 0x05: {  // FMIN / FMAX
+            if (inst.funct3 > 0x1) {
+                return Status::bad(Exception::IllegalInstruction, inst.encoded);
+            }
+            const bool want_max = inst.funct3 == 0x1;
+            u64 flags = 0;
+            if (is_double) {
+                if (is_snan_f64(a_bits) || is_snan_f64(b_bits)) flags |= csr::FFLAG_NV;
+                const bool an = std::isnan(a_d), bn = std::isnan(b_d);
+                if (an && bn) {
+                    write_freg(inst.rd, CANONICAL_NAN_F64);
+                } else {
+                    store_f64(fmin_max(a_d, b_d, want_max, an, bn,
+                                       f64_to_bits(a_d) == (1ull << 63),
+                                       f64_to_bits(b_d) == (1ull << 63)));
+                }
+            } else {
+                if (is_snan_f32(nan_unbox(a_bits)) || is_snan_f32(nan_unbox(b_bits))) {
+                    flags |= csr::FFLAG_NV;
+                }
+                const bool an = std::isnan(a_f), bn = std::isnan(b_f);
+                if (an && bn) {
+                    write_freg(inst.rd, nan_box(CANONICAL_NAN_F32));
+                } else {
+                    store_f32(fmin_max(a_f, b_f, want_max, an, bn,
+                                       f32_to_bits(a_f) == (1u << 31),
+                                       f32_to_bits(b_f) == (1u << 31)));
+                }
+            }
+            csrs.raise_fflags(flags);
+            return Status::good();
+        }
+
+        case 0x08:  // FCVT.S.D / FCVT.D.S - between the two precisions
+            return with_rounding(inst, [&] {
+                if (is_double) store_f64(static_cast<double>(a_f));  // FCVT.D.S
+                else           store_f32(static_cast<float>(a_d));   // FCVT.S.D
+            });
+
+        case 0x14: {  // FEQ / FLT / FLE - comparisons, result to an x register
+            // The quiet comparison (FEQ) raises Invalid only for a signalling
+            // NaN; the ordered ones (FLT, FLE) raise it for any NaN. That
+            // difference is the whole reason there are two kinds.
+            bool result = false;
+            u64  flags  = 0;
+            const bool a_nan = is_double ? std::isnan(a_d) : std::isnan(a_f);
+            const bool b_nan = is_double ? std::isnan(b_d) : std::isnan(b_f);
+            const bool any_snan = is_double
+                ? (is_snan_f64(a_bits) || is_snan_f64(b_bits))
+                : (is_snan_f32(nan_unbox(a_bits)) || is_snan_f32(nan_unbox(b_bits)));
+
+            switch (inst.funct3) {
+                case 0x2:  // FEQ
+                    if (any_snan) flags |= csr::FFLAG_NV;
+                    result = !a_nan && !b_nan && (is_double ? a_d == b_d : a_f == b_f);
+                    break;
+                case 0x1:  // FLT
+                    if (a_nan || b_nan) flags |= csr::FFLAG_NV;
+                    result = !a_nan && !b_nan && (is_double ? a_d < b_d : a_f < b_f);
+                    break;
+                case 0x0:  // FLE
+                    if (a_nan || b_nan) flags |= csr::FFLAG_NV;
+                    result = !a_nan && !b_nan && (is_double ? a_d <= b_d : a_f <= b_f);
+                    break;
+                default:
+                    return Status::bad(Exception::IllegalInstruction, inst.encoded);
+            }
+            csrs.raise_fflags(flags);
+            write_reg(inst.rd, result ? 1 : 0);
+            return Status::good();
+        }
+
+        case 0x18: {  // FCVT.W/WU/L/LU.S/D - float to integer
+            bool invalid = false;
+            i64  result  = 0;
+            RoundingScope rounding(inst.funct3, csrs.rounding_mode());
+            if (!rounding.valid()) {
+                return Status::bad(Exception::IllegalInstruction, inst.encoded);
+            }
+            clear_host_exceptions();
+            const double v = is_double ? a_d : static_cast<double>(a_f);
+            // std::rint applies the current rounding mode, so the truncation to
+            // an integer type afterwards cannot round again.
+            //
+            // rint, not nearbyint: they round identically, and differ only in
+            // that nearbyint is specified to *suppress* the inexact exception.
+            // RISC-V requires fcvt to raise it, so nearbyint gives the right
+            // number with the wrong flags - which riscv-tests rv64uf/fcvt_w
+            // check 2 catches, converting -1.1 and expecting fflags 0x01.
+            const double rounded = std::rint(v);
+            switch (inst.rs2) {
+                case 0: result = convert_to_int<i32>(rounded, invalid); break;  // .W
+                case 1: {                                                        // .WU
+                    const u32 u = convert_to_int<u32>(rounded, invalid);
+                    // A 32-bit result is sign-extended into the 64-bit
+                    // register, even the unsigned one. That surprises people,
+                    // and it is what the spec says.
+                    result = static_cast<i64>(static_cast<i32>(u));
+                    break;
+                }
+                case 2: result = convert_to_int<i64>(rounded, invalid); break;  // .L
+                case 3: result = static_cast<i64>(convert_to_int<u64>(rounded, invalid));
+                        break;                                                   // .LU
+                default:
+                    return Status::bad(Exception::IllegalInstruction, inst.encoded);
+            }
+            // Only the inexact flag survives from the host; range errors are
+            // reported as Invalid, per the rule above.
+            u64 flags = take_host_exceptions() & csr::FFLAG_NX;
+            if (invalid) flags = csr::FFLAG_NV;   // and Invalid displaces Inexact
+            csrs.raise_fflags(flags);
+            write_reg(inst.rd, static_cast<u64>(result));
+            return Status::good();
+        }
+
+        case 0x1a: {  // FCVT.S/D.W/WU/L/LU - integer to float
+            const u64 x = read_reg(inst.rs1);
+            return with_rounding(inst, [&] {
+                double v = 0;
+                switch (inst.rs2) {
+                    case 0: v = static_cast<double>(static_cast<i32>(x)); break;
+                    case 1: v = static_cast<double>(static_cast<u32>(x)); break;
+                    case 2: v = static_cast<double>(static_cast<i64>(x)); break;
+                    case 3: v = static_cast<double>(x); break;
+                    default: break;
+                }
+                if (is_double) store_f64(v); else store_f32(static_cast<float>(v));
+            });
+        }
+
+        case 0x1c: {  // FMV.X.W / FMV.X.D, and FCLASS
+            if (inst.funct3 == 0x0) {
+                // A raw bit move out of the float file. No conversion, no
+                // rounding, no flags - which is how software inspects a float's
+                // encoding, and how it implements copysign in portable C.
+                //
+                // Raw means raw: FMV.X.W takes bits 31:0 as they are and
+                // sign-extends them. It does *not* apply the NaN-boxing rule,
+                // even though almost every other single-precision instruction
+                // does. Unboxing here would replace the bits software asked to
+                // see with a canonical NaN, which defeats the entire purpose of
+                // the instruction. riscv-tests rv64ud/move check 71 builds a
+                // deliberately unboxed register and reads its low half back.
+                if (inst.rs2 != 0) {
+                    return Status::bad(Exception::IllegalInstruction, inst.encoded);
+                }
+                const u64 v = is_double
+                    ? a_bits
+                    : static_cast<u64>(static_cast<i64>(static_cast<i32>(
+                          static_cast<u32>(a_bits))));
+                write_reg(inst.rd, v);
+                return Status::good();
+            }
+            if (inst.funct3 == 0x1) {  // FCLASS
+                write_reg(inst.rd, is_double ? fclass_f64(a_bits)
+                                             : fclass_f32(nan_unbox(a_bits)));
+                return Status::good();
+            }
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
+        }
+
+        case 0x1e: {  // FMV.W.X / FMV.D.X - raw bit move into the float file
+            if (inst.funct3 != 0x0 || inst.rs2 != 0) {
+                return Status::bad(Exception::IllegalInstruction, inst.encoded);
+            }
+            const u64 x = read_reg(inst.rs1);
+            write_freg(inst.rd, is_double ? x : nan_box(static_cast<u32>(x)));
+            return Status::good();
+        }
+
+        default:
+            return Status::bad(Exception::IllegalInstruction, inst.encoded);
+    }
+}
+
+Status Cpu::execute_fused_madd(const DecodedInst& inst) {
+    Status fp = require_fpu();
+    if (!fp) return Status::bad(Exception::IllegalInstruction, inst.encoded);
+
+    // R4-type: a fourth register in the top five bits of what would be funct7.
+    const u32  rs3       = inst.raw >> 27;
+    const bool is_double = ((inst.raw >> 25) & 0x3) == 0x1;
+    if (((inst.raw >> 25) & 0x3) > 0x1) {
+        return Status::bad(Exception::IllegalInstruction, inst.encoded);
+    }
+
+    // The point of a fused multiply-add is that the product is *not* rounded
+    // before the addition - the whole a*b+c is computed once and rounded once.
+    // std::fma is exactly this operation, and using a*b+c instead would round
+    // twice and give a different answer in the last bit. That difference is
+    // precisely what numerical code uses fma to avoid, so it is not a detail
+    // that can be waved away.
+    const bool negate_product = (inst.opcode == opcodes::NMSUB ||
+                                 inst.opcode == opcodes::NMADD);
+    const bool subtract_addend = (inst.opcode == opcodes::MSUB ||
+                                  inst.opcode == opcodes::NMADD);
+
+    return with_rounding(inst, [&] {
+        if (is_double) {
+            double a = bits_to_f64(fregs[inst.rs1]);
+            double b = bits_to_f64(fregs[inst.rs2]);
+            double c = bits_to_f64(fregs[rs3]);
+            if (negate_product)  a = -a;
+            if (subtract_addend) c = -c;
+            const double r = std::fma(a, b, c);
+            write_freg(inst.rd, std::isnan(r) ? CANONICAL_NAN_F64 : f64_to_bits(r));
+        } else {
+            float a = bits_to_f32(nan_unbox(fregs[inst.rs1]));
+            float b = bits_to_f32(nan_unbox(fregs[inst.rs2]));
+            float c = bits_to_f32(nan_unbox(fregs[rs3]));
+            if (negate_product)  a = -a;
+            if (subtract_addend) c = -c;
+            const float r = std::fma(a, b, c);
+            write_freg(inst.rd,
+                       nan_box(std::isnan(r) ? CANONICAL_NAN_F32 : f32_to_bits(r)));
+        }
+    });
 }
 
 Status Cpu::execute_branch(const DecodedInst& inst) {
@@ -798,7 +1242,16 @@ Status Cpu::execute_system(const DecodedInst& inst) {
             // user program's system call.
             switch (priv) {
                 case PRIV_USER:       return Status::bad(Exception::ECallFromUMode, 0);
-                case PRIV_SUPERVISOR: return Status::bad(Exception::ECallFromSMode, 0);
+                case PRIV_SUPERVISOR:
+                    // With SBI enabled, an ecall from supervisor mode is a call
+                    // into firmware, not an exception. The emulator answers it
+                    // and execution continues at the instruction after the
+                    // ecall - which is why this returns success rather than a
+                    // trap, and why next_pc_ has already been set past it.
+                    if (sbi_enabled && sbi::handle_ecall(*this)) {
+                        return Status::good();
+                    }
+                    return Status::bad(Exception::ECallFromSMode, 0);
                 default:              return Status::bad(Exception::ECallFromMMode, 0);
             }
 
@@ -969,6 +1422,18 @@ Result<u64> Cpu::csr_read(u32 addr) const {
     if (!csrs.exists(addr)) {
         return Result<u64>::bad(Exception::IllegalInstruction, 0);
     }
+    // The floating-point CSRs are part of the state mstatus.FS protects, so
+    // they are unreachable while the unit is off. A kernel that turns the FPU
+    // off to avoid saving it must be able to rely on user code not reading the
+    // rounding mode a *different* process left behind - fcsr is as much
+    // floating-point state as the registers are.
+    if (addr == csr::FCSR || addr == csr::FFLAGS || addr == csr::FRM) {
+        if (!csrs.fpu_enabled()) {
+            return Result<u64>::bad(Exception::IllegalInstruction, 0);
+        }
+    }
+
+
     if (priv < csr::min_privilege(addr)) {
         return Result<u64>::bad(Exception::IllegalInstruction, 0);
     }
@@ -1002,6 +1467,16 @@ Result<u64> Cpu::csr_read(u32 addr) const {
 Status Cpu::csr_write(u32 addr, u64 value) {
     if (!csrs.exists(addr)) {
         return Status::bad(Exception::IllegalInstruction, 0);
+    }
+
+    // See csr_read: the floating-point CSRs are gated by mstatus.FS, and a
+    // write to one also makes the unit Dirty - fcsr is state a context switch
+    // has to save, exactly like the registers.
+    if (addr == csr::FCSR || addr == csr::FFLAGS || addr == csr::FRM) {
+        if (!csrs.fpu_enabled()) {
+            return Status::bad(Exception::IllegalInstruction, 0);
+        }
+        csrs.mark_fpu_dirty();
     }
     if (csr::is_read_only(addr)) {
         return Status::bad(Exception::IllegalInstruction, 0);

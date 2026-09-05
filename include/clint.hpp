@@ -49,6 +49,20 @@ public:
 
     u64 mtime() const { return mtime_; }
 
+    // Set the timer deadline on behalf of a supervisor, and clear the pending
+    // timer interrupt.
+    //
+    // mtimecmp is a machine-mode register, so a kernel running in S-mode cannot
+    // write it - which is the entire reason SBI has a set_timer call. Clearing
+    // MTIP here is required by the SBI specification and is easy to miss: the
+    // interrupt that just fired is still pending, and if it is not cleared when
+    // the new deadline is set the kernel re-enters its timer handler
+    // immediately and never makes progress.
+    void set_timer(u64 deadline, CsrFile& csrs) {
+        mtimecmp_ = deadline;
+        csrs.clear_interrupt(csr::MIP_MTIP);
+    }
+
     // How fast the clock runs relative to instruction retirement. Larger values
     // make each timer tick cover more instructions.
     u64 ticks_per_instruction = 1;

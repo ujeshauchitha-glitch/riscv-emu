@@ -80,6 +80,19 @@ public:
 
     ~Uart() override;
 
+    // Take one byte from the receive queue, or -1 if nothing is waiting.
+    //
+    // This is the SBI console_getchar path, which bypasses the UART's registers
+    // entirely - the kernel is asking firmware for a character rather than
+    // driving the device itself, and it uses this before it has a serial driver
+    // at all.
+    int take_input_byte() {
+        if (rx_.empty()) return -1;
+        const int c = rx_.front();
+        rx_.pop_front();
+        return c;
+    }
+
     // True when the guest should see an interrupt. Wired to the PLIC in phase 7;
     // exposed now so the logic lives with the device.
     bool interrupting() const;

@@ -58,6 +58,16 @@ constexpr u32 MIP       = 0x344;
 // kernel clears sstatus.SIE to disable interrupts, and if that does not
 // actually clear mstatus.SIE, interrupts keep arriving inside what the kernel
 // believes is a critical section.
+// --- floating point (F and D) ---
+//
+// Three addresses onto one register. fcsr is the whole thing; fflags and frm
+// are windows onto its two halves, and software uses them constantly - a
+// routine that needs round-toward-zero writes frm alone rather than
+// read-modify-writing fcsr.
+constexpr u32 FFLAGS    = 0x001;
+constexpr u32 FRM       = 0x002;
+constexpr u32 FCSR      = 0x003;
+
 constexpr u32 SSTATUS   = 0x100;
 constexpr u32 SIE       = 0x104;
 constexpr u32 STVEC     = 0x105;
@@ -112,6 +122,27 @@ constexpr u64 MSTATUS_MPIE = 1ull << 7;   // previous MIE
 constexpr u64 MSTATUS_SPP  = 1ull << 8;   // previous privilege (supervisor)
 constexpr u64 MSTATUS_MPP  = 3ull << 11;  // previous privilege (machine), 2 bits
 constexpr int MSTATUS_MPP_SHIFT = 11;
+// The floating-point unit's state, in two bits: 0 Off, 1 Initial, 2 Clean,
+// 3 Dirty. A kernel uses this to avoid saving 32 registers on every context
+// switch - it only has to save them if the FPU is Dirty, meaning the process
+// actually touched a float since the state was last made Clean.
+//
+// It is also an enable: while FS is Off, every floating-point instruction and
+// every access to fcsr traps as an illegal instruction. That is not a detail -
+// it is how a kernel that does not support floating point stops user code from
+// silently corrupting a register file nobody is saving.
+constexpr u64 MSTATUS_FS       = 3ull << 13;
+constexpr int MSTATUS_FS_SHIFT = 13;
+constexpr u64 MSTATUS_FS_OFF     = 0ull << MSTATUS_FS_SHIFT;
+constexpr u64 MSTATUS_FS_INITIAL = 1ull << MSTATUS_FS_SHIFT;
+constexpr u64 MSTATUS_FS_CLEAN   = 2ull << MSTATUS_FS_SHIFT;
+constexpr u64 MSTATUS_FS_DIRTY   = 3ull << MSTATUS_FS_SHIFT;
+
+// SD, the topmost bit of mstatus, is a read-only summary: set when FS (or, on
+// a machine with vectors, VS) is Dirty. A context switch reads one bit rather
+// than picking apart fields.
+constexpr u64 MSTATUS_SD   = 1ull << 63;
+
 constexpr u64 MSTATUS_MPRV = 1ull << 17;  // load/store as MPP's privilege
 constexpr u64 MSTATUS_SUM  = 1ull << 18;  // supervisor may access user pages
 constexpr u64 MSTATUS_MXR  = 1ull << 19;  // make executable pages readable
@@ -126,10 +157,33 @@ constexpr u64 MSTATUS_TSR  = 1ull << 22;  // trap SRET
 // The bits sstatus exposes. Everything else in mstatus is machine-only and
 // reads as zero through the supervisor view.
 constexpr u64 SSTATUS_MASK = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP |
-                             MSTATUS_SUM | MSTATUS_MXR;
+                             MSTATUS_SUM | MSTATUS_MXR | MSTATUS_FS |
+                             MSTATUS_SD;
 
 // The interrupt bits sie/sip expose.
 constexpr u64 SIE_SIP_MASK = (1ull << 1) | (1ull << 5) | (1ull << 9);
+
+// --- fcsr ---
+// Bits [4:0] are the accrued exception flags, [7:5] the rounding mode.
+constexpr u64 FCSR_FFLAGS_MASK = 0x1f;
+constexpr u64 FCSR_FRM_MASK    = 0x7 << 5;
+constexpr int FCSR_FRM_SHIFT   = 5;
+
+// The five accrued exception flags, in the order the spec numbers them.
+constexpr u64 FFLAG_NX = 1 << 0;   // inexact
+constexpr u64 FFLAG_UF = 1 << 1;   // underflow
+constexpr u64 FFLAG_OF = 1 << 2;   // overflow
+constexpr u64 FFLAG_DZ = 1 << 3;   // divide by zero
+constexpr u64 FFLAG_NV = 1 << 4;   // invalid operation
+
+// Rounding modes. RNE is round-to-nearest-even, the IEEE default; DYN in an
+// instruction's rm field means "use whatever frm says".
+constexpr u32 FRM_RNE = 0;   // to nearest, ties to even
+constexpr u32 FRM_RTZ = 1;   // toward zero
+constexpr u32 FRM_RDN = 2;   // down (toward -inf)
+constexpr u32 FRM_RUP = 3;   // up (toward +inf)
+constexpr u32 FRM_RMM = 4;   // to nearest, ties away from zero
+constexpr u32 FRM_DYN = 7;   // in an instruction: use frm
 
 // --- satp ---
 constexpr int SATP_MODE_SHIFT = 60;
@@ -220,6 +274,38 @@ public:
     }
 
     bool sstc_enabled() const { return (read(csr::MENVCFG) & csr::MENVCFG_STCE) != 0; }
+
+    // Is the floating-point unit usable?
+    //
+    // While mstatus.FS is Off, every floating-point instruction and every
+    // access to fcsr raises an illegal-instruction trap. That is how a kernel
+    // with no FPU support stops user code from quietly corrupting a register
+    // file nobody is saving across context switches.
+    bool fpu_enabled() const {
+        return (read(csr::MSTATUS) & csr::MSTATUS_FS) != csr::MSTATUS_FS_OFF;
+    }
+
+    // Mark the floating-point registers as modified. Called by every
+    // instruction that writes an f register or the fcsr, because a kernel uses
+    // exactly this to decide whether a context switch has to save all 32 of
+    // them - and one missed transition is a process silently inheriting
+    // another's floating-point state.
+    void mark_fpu_dirty() {
+        raw_[csr::MSTATUS] = (raw_[csr::MSTATUS] & ~csr::MSTATUS_FS) |
+                             csr::MSTATUS_FS_DIRTY;
+    }
+
+    // Accumulate IEEE exception flags into fcsr. They are sticky: nothing but
+    // an explicit write ever clears them, which is what lets a program run a
+    // long calculation and ask afterwards whether anything went wrong.
+    void raise_fflags(u64 flags) {
+        raw_[csr::FCSR] |= (flags & csr::FCSR_FFLAGS_MASK);
+    }
+
+    u32 rounding_mode() const {
+        return static_cast<u32>((raw_[csr::FCSR] & csr::FCSR_FRM_MASK) >>
+                                csr::FCSR_FRM_SHIFT);
+    }
 
     u64 satp() const { return read(csr::SATP); }
     u64 satp_mode() const { return (satp() & csr::SATP_MODE_MASK) >> csr::SATP_MODE_SHIFT; }
