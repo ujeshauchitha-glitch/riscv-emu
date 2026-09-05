@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  # Only the default branch on push. Without the branch filter, a push to a
+  # branch that also has an open pull request triggers two identical runs -
+  # double the time and cost for no extra signal.
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push supersedes whatever was already running for the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build, unit tests, riscv-tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the RISC-V toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-riscv64-unknown-elf cmake build-essential
+
+      - name: Configure
+        # -Werror only in CI: a warning fails the build here, but should not
+        # stop someone building locally on a compiler with different defaults.
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-Werror
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Unit tests and bare-metal self-tests
+        run: ctest --test-dir build --output-on-failure
+
+      # The official suite the RISC-V project maintains. This is the check that
+      # matters most: everything else in this repository was written alongside
+      # the emulator and could share a misreading of the specification with it.
+      - name: riscv-tests
+        run: ./scripts/run-riscv-tests.sh
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Results" >> "$GITHUB_STEP_SUMMARY"
+          ctest --test-dir build -N 2>/dev/null | tail -1 >> "$GITHUB_STEP_SUMMARY" || true
