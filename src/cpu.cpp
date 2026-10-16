@@ -41,11 +41,13 @@ Cpu::Cpu(Bus& bus) : mmu(bus), bus_(bus) {
 
 u64 Cpu::read_reg(u32 index) const {
     if (index == 0 || index >= NUM_REGS) return 0;
+    if (regfile) [[unlikely]] return regfile->read(index);
     return regs[index];
 }
 
 void Cpu::write_reg(u32 index, u64 value) {
     if (index == 0 || index >= NUM_REGS) return;
+    if (regfile) [[unlikely]] { regfile->write(index, value); return; }
     regs[index] = value;
 }
 
@@ -555,7 +557,7 @@ Status Cpu::execute_jalr(const DecodedInst& inst) {
     // the C extension can use bit 0 of a function pointer without confusing
     // indirect jumps. Note the ordering: add, *then* clear, so `jalr rd, rs1, 1`
     // is a legal way to reach an even address.
-    const u64 target = (read_reg(inst.rs1) + static_cast<u64>(inst.imm)) & ~1ull;
+    const u64 target = alu(AluOp::Add, read_reg(inst.rs1), static_cast<u64>(inst.imm)) & ~1ull;
     const u64 link   = pc + inst.length;   // 2 after a C.JALR - see execute_jal
 
     Status st = set_branch_target(target);
@@ -1023,12 +1025,12 @@ Status Cpu::execute_branch(const DecodedInst& inst) {
 
     bool taken = false;
     switch (inst.funct3) {
-        case 0x0: taken = (a == b); break;                                     // BEQ
-        case 0x1: taken = (a != b); break;                                     // BNE
-        case 0x4: taken = (static_cast<i64>(a) < static_cast<i64>(b)); break;  // BLT
-        case 0x5: taken = (static_cast<i64>(a) >= static_cast<i64>(b)); break; // BGE
-        case 0x6: taken = (a < b); break;                                      // BLTU
-        case 0x7: taken = (a >= b); break;                                     // BGEU
+        case 0x0: taken = (alu(AluOp::Xor, a, b) == 0); break;   // BEQ
+        case 0x1: taken = (alu(AluOp::Xor, a, b) != 0); break;   // BNE
+        case 0x4: taken = (alu(AluOp::Slt, a, b) != 0); break;   // BLT
+        case 0x5: taken = (alu(AluOp::Slt, a, b) == 0); break;   // BGE
+        case 0x6: taken = (alu(AluOp::Sltu, a, b) != 0); break;  // BLTU
+        case 0x7: taken = (alu(AluOp::Sltu, a, b) == 0); break;  // BGEU
         default:
             return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
@@ -1048,7 +1050,7 @@ Status Cpu::execute_branch(const DecodedInst& inst) {
 // ---------------------------------------------------------------------------
 
 Status Cpu::execute_load(const DecodedInst& inst) {
-    const u64 addr = read_reg(inst.rs1) + static_cast<u64>(inst.imm);
+    const u64 addr = alu(AluOp::Add, read_reg(inst.rs1), static_cast<u64>(inst.imm));
 
     unsigned size   = 0;
     bool     signed_ = false;
@@ -1081,7 +1083,7 @@ Status Cpu::execute_load(const DecodedInst& inst) {
 }
 
 Status Cpu::execute_store(const DecodedInst& inst) {
-    const u64 addr  = read_reg(inst.rs1) + static_cast<u64>(inst.imm);
+    const u64 addr  = alu(AluOp::Add, read_reg(inst.rs1), static_cast<u64>(inst.imm));
     const u64 value = read_reg(inst.rs2);
 
     unsigned size = 0;
@@ -1118,7 +1120,7 @@ Status Cpu::execute_op_imm(const DecodedInst& inst) {
             // Wrapping addition is the defined behaviour; overflow is ignored
             // and never traps. Unsigned arithmetic gives us that for free
             // (signed overflow would be UB in C++).
-            write_reg(inst.rd, rs1 + imm);
+            write_reg(inst.rd, alu(AluOp::Add, rs1, imm));
             return Status::good();
 
         case 0x1: {  // SLLI
@@ -1127,12 +1129,12 @@ Status Cpu::execute_op_imm(const DecodedInst& inst) {
             if (inst.funct6() != 0x00) {
                 return Status::bad(Exception::IllegalInstruction, inst.encoded);
             }
-            write_reg(inst.rd, rs1 << inst.shamt6());
+            write_reg(inst.rd, alu(AluOp::Sll, rs1, inst.shamt6()));
             return Status::good();
         }
 
         case 0x2:  // SLTI - set if less than, signed
-            write_reg(inst.rd, (static_cast<i64>(rs1) < inst.imm) ? 1 : 0);
+            write_reg(inst.rd, alu(AluOp::Slt, rs1, imm));
             return Status::good();
 
         case 0x3:  // SLTIU - set if less than, unsigned
@@ -1141,32 +1143,32 @@ Status Cpu::execute_op_imm(const DecodedInst& inst) {
             // compares against 0xFFFF_FFFF_FFFF_FFFF, which is the idiom for
             // "is rs1 != max". Zero-extending the 12-bit field instead is a
             // classic emulator bug.
-            write_reg(inst.rd, (rs1 < imm) ? 1 : 0);
+            write_reg(inst.rd, alu(AluOp::Sltu, rs1, imm));
             return Status::good();
 
         case 0x4:  // XORI
-            write_reg(inst.rd, rs1 ^ imm);
+            write_reg(inst.rd, alu(AluOp::Xor, rs1, imm));
             return Status::good();
 
         case 0x5: {  // SRLI / SRAI
             const u32 shamt = inst.shamt6();
             if (inst.funct6() == 0x00) {  // SRLI - logical, shifts in zeros
-                write_reg(inst.rd, rs1 >> shamt);
+                write_reg(inst.rd, alu(AluOp::Srl, rs1, shamt));
                 return Status::good();
             }
             if (inst.funct6() == 0x10) {  // SRAI - arithmetic, shifts in sign
-                write_reg(inst.rd, static_cast<u64>(static_cast<i64>(rs1) >> shamt));
+                write_reg(inst.rd, alu(AluOp::Sra, rs1, shamt));
                 return Status::good();
             }
             return Status::bad(Exception::IllegalInstruction, inst.encoded);
         }
 
         case 0x6:  // ORI
-            write_reg(inst.rd, rs1 | imm);
+            write_reg(inst.rd, alu(AluOp::Or, rs1, imm));
             return Status::good();
 
         case 0x7:  // ANDI
-            write_reg(inst.rd, rs1 & imm);
+            write_reg(inst.rd, alu(AluOp::And, rs1, imm));
             return Status::good();
 
         default:
@@ -1179,28 +1181,28 @@ Status Cpu::execute_op_imm(const DecodedInst& inst) {
 // value by more than 31 - so these use funct7 as the selector rather than the
 // funct6 that the 64-bit shifts need.
 Status Cpu::execute_op_imm_32(const DecodedInst& inst) {
-    const u32 rs1 = static_cast<u32>(read_reg(inst.rs1));
+    const u64 rs1 = read_reg(inst.rs1);
 
     switch (inst.funct3) {
         case 0x0:  // ADDIW
-            write_reg(inst.rd, sext32(rs1 + static_cast<u32>(inst.imm)));
+            write_reg(inst.rd, alu(AluOp::AddW, rs1, static_cast<u64>(inst.imm)));
             return Status::good();
 
         case 0x1:  // SLLIW
             if (inst.funct7 != 0x00) {
                 return Status::bad(Exception::IllegalInstruction, inst.encoded);
             }
-            write_reg(inst.rd, sext32(rs1 << inst.shamt5()));
+            write_reg(inst.rd, alu(AluOp::SllW, rs1, inst.shamt5()));
             return Status::good();
 
         case 0x5: {  // SRLIW / SRAIW
             const u32 shamt = inst.shamt5();
             if (inst.funct7 == 0x00) {  // SRLIW
-                write_reg(inst.rd, sext32(rs1 >> shamt));
+                write_reg(inst.rd, alu(AluOp::SrlW, rs1, shamt));
                 return Status::good();
             }
             if (inst.funct7 == 0x20) {  // SRAIW
-                write_reg(inst.rd, sext32(static_cast<u32>(static_cast<i32>(rs1) >> shamt)));
+                write_reg(inst.rd, alu(AluOp::SraW, rs1, shamt));
                 return Status::good();
             }
             return Status::bad(Exception::IllegalInstruction, inst.encoded);
@@ -1228,53 +1230,50 @@ Status Cpu::execute_op(const DecodedInst& inst) {
     const u64 a = read_reg(inst.rs1);
     const u64 b = read_reg(inst.rs2);
 
-    // Shift amounts come from the low 6 bits of rs2 on RV64. Masking is
-    // required, not optional: shifting a 64-bit value by >= 64 is undefined
-    // behaviour in C++, so an unmasked shift by a large register value is a
-    // real bug even though the spec says only the low bits are used.
-    const u32 shamt = static_cast<u32>(b & 0x3f);
+    // Shift amounts come from the low 6 bits of rs2 on RV64; the ALU masks
+    // them (an unmasked shift by >= 64 would be undefined behaviour in C++).
 
     switch (inst.funct3) {
         case 0x0:  // ADD / SUB
-            write_reg(inst.rd, (inst.funct7 == 0x20) ? (a - b) : (a + b));
+            write_reg(inst.rd, alu(inst.funct7 == 0x20 ? AluOp::Sub : AluOp::Add, a, b));
             return Status::good();
 
         case 0x1:  // SLL
             if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.encoded);
-            write_reg(inst.rd, a << shamt);
+            write_reg(inst.rd, alu(AluOp::Sll, a, b));
             return Status::good();
 
         case 0x2:  // SLT
             if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.encoded);
-            write_reg(inst.rd, (static_cast<i64>(a) < static_cast<i64>(b)) ? 1 : 0);
+            write_reg(inst.rd, alu(AluOp::Slt, a, b));
             return Status::good();
 
         case 0x3:  // SLTU
             if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.encoded);
-            write_reg(inst.rd, (a < b) ? 1 : 0);
+            write_reg(inst.rd, alu(AluOp::Sltu, a, b));
             return Status::good();
 
         case 0x4:  // XOR
             if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.encoded);
-            write_reg(inst.rd, a ^ b);
+            write_reg(inst.rd, alu(AluOp::Xor, a, b));
             return Status::good();
 
         case 0x5:  // SRL / SRA
             if (inst.funct7 == 0x20) {
-                write_reg(inst.rd, static_cast<u64>(static_cast<i64>(a) >> shamt));
+                write_reg(inst.rd, alu(AluOp::Sra, a, b));
             } else {
-                write_reg(inst.rd, a >> shamt);
+                write_reg(inst.rd, alu(AluOp::Srl, a, b));
             }
             return Status::good();
 
         case 0x6:  // OR
             if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.encoded);
-            write_reg(inst.rd, a | b);
+            write_reg(inst.rd, alu(AluOp::Or, a, b));
             return Status::good();
 
         case 0x7:  // AND
             if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.encoded);
-            write_reg(inst.rd, a & b);
+            write_reg(inst.rd, alu(AluOp::And, a, b));
             return Status::good();
 
         default:
@@ -1289,27 +1288,26 @@ Status Cpu::execute_op_32(const DecodedInst& inst) {
         return Status::bad(Exception::IllegalInstruction, inst.encoded);
     }
 
-    const u32 a = static_cast<u32>(read_reg(inst.rs1));
-    const u32 b = static_cast<u32>(read_reg(inst.rs2));
-
-    // 5-bit shift amount for the 32-bit forms.
-    const u32 shamt = static_cast<u32>(read_reg(inst.rs2) & 0x1f);
+    // The ALU takes the full operands: it uses the low 32 bits, and for the
+    // shifts only the low 5 bits of rs2 as the shift amount.
+    const u64 a = read_reg(inst.rs1);
+    const u64 b = read_reg(inst.rs2);
 
     switch (inst.funct3) {
         case 0x0:  // ADDW / SUBW
-            write_reg(inst.rd, sext32((inst.funct7 == 0x20) ? (a - b) : (a + b)));
+            write_reg(inst.rd, alu(inst.funct7 == 0x20 ? AluOp::SubW : AluOp::AddW, a, b));
             return Status::good();
 
         case 0x1:  // SLLW
             if (inst.funct7 != 0x00) return Status::bad(Exception::IllegalInstruction, inst.encoded);
-            write_reg(inst.rd, sext32(a << shamt));
+            write_reg(inst.rd, alu(AluOp::SllW, a, b));
             return Status::good();
 
         case 0x5:  // SRLW / SRAW
             if (inst.funct7 == 0x20) {
-                write_reg(inst.rd, sext32(static_cast<u32>(static_cast<i32>(a) >> shamt)));
+                write_reg(inst.rd, alu(AluOp::SraW, a, b));
             } else {
-                write_reg(inst.rd, sext32(a >> shamt));
+                write_reg(inst.rd, alu(AluOp::SrlW, a, b));
             }
             return Status::good();
 
@@ -2042,7 +2040,7 @@ void Cpu::dump_registers(std::ostream& os) const {
         // ragged columns because the names vary from 2 to 4 characters.
         std::string label = "x" + std::to_string(i) + " (" + REG_ABI_NAMES[i] + ")";
         os << std::left << std::setfill(' ') << std::setw(12) << label << std::right
-           << ": 0x" << std::hex << std::setfill('0') << std::setw(16) << regs[i]
+           << ": 0x" << std::hex << std::setfill('0') << std::setw(16) << read_reg(i)
            << std::dec << "\n";
     }
     os << std::setfill(' ') << "instret: " << instret << "\n";
