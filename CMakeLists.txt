@@ -68,6 +68,7 @@ set(RISCV_EMU_TESTS
   test_compressed
   test_float
   test_firmware
+  test_backends
 )
 
 foreach(test_name IN LISTS RISCV_EMU_TESTS)
