@@ -3,6 +3,7 @@
 #include <array>
 #include <iosfwd>
 
+#include "backends.hpp"
 #include "bus.hpp"
 #include "clint.hpp"
 #include "csr.hpp"
@@ -58,6 +59,17 @@ public:
     // and any instruction whose result is unwanted just targets x0).
     u64  read_reg(u32 index) const;
     void write_reg(u32 index, u64 value);
+
+    // Optional replacements for the integer register file and the integer ALU
+    // (see backends.hpp). Both are null by default, which leaves the core
+    // exactly as it was. Borrowed, not owned. Install them before running.
+    //
+    // The ALU backend covers the base-ISA integer arithmetic, the comparisons
+    // behind branches, and data-address generation for integer loads/stores and
+    // JALR. It does not cover the PC adders (pc + imm, pc + 4, AUIPC, JAL), the
+    // M/A/F/D extensions, or CSR operations; those stay plain.
+    RegFileBackend* regfile     = nullptr;
+    AluBackend*     alu_backend = nullptr;
 
     // Run one instruction. Returns OK, or the trap the instruction raised.
     Status step();
@@ -276,4 +288,13 @@ private:
     Status set_branch_target(u64 target);
 
     void trace_inst(const DecodedInst& inst) const;
+
+    // One integer ALU operation: the installed backend, or the plain ALU.
+    // Inlined, and `op` is a literal at nearly every call site, so with no
+    // backend installed this folds back to the original expression plus one
+    // never-taken branch.
+    inline u64 alu(AluOp op, u64 a, u64 b) {
+        if (alu_backend) [[unlikely]] return alu_backend->exec(op, a, b);
+        return alu_reference(op, a, b);
+    }
 };

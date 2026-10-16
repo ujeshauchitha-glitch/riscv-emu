@@ -21,7 +21,7 @@ REPO_URL="https://github.com/riscv-software-src/riscv-tests.git"
 SRC_DIR="third_party/riscv-tests"
 BUILD_DIR="build/riscv-tests"
 ENV_DIR="tests/riscv-tests-env"
-EMU="build/riscv_emu"
+EMU="${EMU:-build/riscv_emu}"
 
 # Suites the emulator can run today. rv64si needs supervisor mode (phase 6) and
 # rv64uf/rv64ud need floating point (phase 8), so they are deliberately absent.
