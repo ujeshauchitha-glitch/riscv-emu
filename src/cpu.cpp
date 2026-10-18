@@ -1212,6 +1212,10 @@ Status Cpu::execute_store(const DecodedInst& inst) {
 // ---------------------------------------------------------------------------
 
 Status Cpu::execute_op_imm(const DecodedInst& inst) {
+    {
+        Status zb;
+        if (execute_zb_op_imm(inst, zb)) return zb;
+    }
     const u64 rs1 = read_reg(inst.rs1);
     const u64 imm = static_cast<u64>(inst.imm);  // already sign-extended to 64
 
@@ -1281,6 +1285,10 @@ Status Cpu::execute_op_imm(const DecodedInst& inst) {
 // value by more than 31 - so these use funct7 as the selector rather than the
 // funct6 that the 64-bit shifts need.
 Status Cpu::execute_op_imm_32(const DecodedInst& inst) {
+    {
+        Status zb;
+        if (execute_zb_op_imm_32(inst, zb)) return zb;
+    }
     const u64 rs1 = read_reg(inst.rs1);
 
     switch (inst.funct3) {
@@ -1322,6 +1330,11 @@ Status Cpu::execute_op(const DecodedInst& inst) {
     // base ALU operations and differs only in funct7. A `mul` decoded as an
     // `add` would be a genuinely nasty bug.
     if (inst.funct7 == 0x01) return execute_mul_div(inst);
+
+    {
+        Status zb;
+        if (execute_zb_op(inst, zb)) return zb;
+    }
 
     if (inst.funct7 != 0x00 && inst.funct7 != 0x20) {
         return Status::bad(Exception::IllegalInstruction, inst.encoded);
@@ -1383,6 +1396,11 @@ Status Cpu::execute_op(const DecodedInst& inst) {
 
 Status Cpu::execute_op_32(const DecodedInst& inst) {
     if (inst.funct7 == 0x01) return execute_mul_div_32(inst);
+
+    {
+        Status zb;
+        if (execute_zb_op_32(inst, zb)) return zb;
+    }
 
     if (inst.funct7 != 0x00 && inst.funct7 != 0x20) {
         return Status::bad(Exception::IllegalInstruction, inst.encoded);

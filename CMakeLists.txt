@@ -43,6 +43,7 @@ endif()
 add_library(riscv_core STATIC
   src/bus.cpp
   src/cpu.cpp
+  src/cpu_bitmanip.cpp
   src/clint.cpp
   src/csr.cpp
   src/elf_loader.cpp
@@ -99,6 +100,32 @@ set(RISCV_EMU_TESTS
   test_usernet
   test_gdbstub
 )
+
+# The bit-manipulation extensions are checked against an independent model
+# (tests/gen_bitmanip_vectors.py): tens of thousands of random and edge-case
+# vectors, generated at build time. The hand-written cases in the same program
+# still run without Python.
+set(BITMANIP_VECTORS ${CMAKE_BINARY_DIR}/bitmanip_vectors.txt)
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+  add_custom_command(
+    OUTPUT ${BITMANIP_VECTORS}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gen_bitmanip_vectors.py ${BITMANIP_VECTORS}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/gen_bitmanip_vectors.py
+    COMMENT "Generating bit-manipulation test vectors")
+  add_custom_target(bitmanip_vectors ALL DEPENDS ${BITMANIP_VECTORS})
+  set(BITMANIP_ARGS ${BITMANIP_VECTORS})
+else()
+  message(STATUS "Python 3 not found; the bit-manipulation differential test will be skipped")
+  set(BITMANIP_ARGS "")
+endif()
+add_executable(test_bitmanip tests/test_bitmanip.cpp)
+target_link_libraries(test_bitmanip PRIVATE riscv_core)
+target_include_directories(test_bitmanip PRIVATE tests)
+add_test(NAME test_bitmanip COMMAND test_bitmanip ${BITMANIP_ARGS})
+if(Python3_FOUND)
+  add_dependencies(test_bitmanip bitmanip_vectors)
+endif()
 
 # A throughput benchmark, built but deliberately not registered as a test: it
 # measures speed, it does not check correctness, and a timing threshold in CI

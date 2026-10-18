@@ -34,7 +34,7 @@ CsrFile::CsrFile() {
     // so it must not claim more than we deliver.
     // 'S' and 'U' announce that supervisor and user mode exist. A kernel checks
     // misa before trying to drop privilege.
-    raw_[csr::MISA] = MISA_MXL_64 | misa_ext('I') | misa_ext('M') | misa_ext('A') |
+    raw_[csr::MISA] = MISA_MXL_64 | misa_ext('I') | misa_ext('M') | misa_ext('A') | misa_ext('B') |
                       misa_ext('C') | misa_ext('F') | misa_ext('D') |
                       misa_ext('S') | misa_ext('U');
 

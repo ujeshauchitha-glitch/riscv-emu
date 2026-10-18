@@ -336,6 +336,14 @@ private:
     Status execute_mul_div(const DecodedInst& inst);    // M: MUL, DIV, REM
     Status execute_mul_div_32(const DecodedInst& inst); // M: MULW, DIVW, REMW
     Status execute_amo(const DecodedInst& inst);        // A: LR/SC and the AMOs
+
+    // Zba, Zbb, Zbc, Zbs, Zicond. Each is tried before the base-ISA handler for
+    // the same opcode and returns true if the encoding is one of theirs (storing
+    // the outcome in `out`); see cpu_bitmanip.cpp.
+    bool execute_zb_op(const DecodedInst& inst, Status& out);
+    bool execute_zb_op_32(const DecodedInst& inst, Status& out);
+    bool execute_zb_op_imm(const DecodedInst& inst, Status& out);
+    bool execute_zb_op_imm_32(const DecodedInst& inst, Status& out);
     Status execute_csr(const DecodedInst& inst);        // CSRRW/S/C and imm forms
     Status execute_mret(const DecodedInst& inst);
     Status execute_sret(const DecodedInst& inst);

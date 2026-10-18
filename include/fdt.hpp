@@ -56,7 +56,12 @@ struct FdtConfig {
     // the emulator actually implements: claim more and the kernel executes an
     // instruction that traps, claim less and it takes a slower path for no
     // reason.
-    std::string isa = "rv64imafdc_zicsr_zifencei";
+    //
+    // Beyond the base RV64GC: the bit-manipulation extensions (Zba, Zbb, Zbc, Zbs)
+    // and conditional-zero (Zicond), which a distribution built for a modern core
+    // expects, and Zihintpause (the `pause` hint, which this machine executes as
+    // the no-op it is).
+    std::string isa = "rv64imafdc_zicsr_zifencei_zicond_zihintpause_zba_zbb_zbc_zbs";
 };
 
 class Fdt {

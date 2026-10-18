@@ -73,6 +73,8 @@ void print_usage(const char* argv0) {
         << "  --bootargs STR       the kernel command line placed in /chosen\n"
         << "  --initrd FILE        load an initramfs and point the kernel at it\n"
         << "  --dump-dtb FILE      write the generated device tree out and exit\n"
+        << "  --isa STRING         the riscv,isa string given to the kernel (default advertises\n"
+        << "                       everything implemented; shorten it to hide an extension)\n"
         << "  -h, --help           show this message\n"
         << "\n"
         << "  To boot xv6, use scripts/boot-xv6.sh - it fetches and builds it\n"
@@ -147,6 +149,7 @@ int main(int argc, char** argv) {
     bool        drive_snapshot = false;
     std::string net_mode;
     std::string net_dns;
+    std::string isa_override;
     bool        want_gdb = false;
     u64         gdb_port = 0;
     bool        want_rng = false;
@@ -195,6 +198,10 @@ int main(int argc, char** argv) {
                 return 2;
             }
             want_gdb = true;
+        }
+        else if (arg == "--isa") {
+            if (i + 1 >= argc) { std::cerr << "error: --isa requires a string\n"; return 2; }
+            isa_override = argv[++i];
         }
         else if (arg == "--rng") want_rng = true;
         else if (arg == "--rtc") want_rtc = true;
@@ -447,6 +454,7 @@ int main(int argc, char** argv) {
         fdt_config.virtio_net   = static_cast<bool>(net_backend);
         fdt_config.virtio_rng   = want_rng;
         fdt_config.rtc          = want_rtc;
+        if (!isa_override.empty()) fdt_config.isa = isa_override;
         const std::vector<u8> dtb = Fdt::build(fdt_config);
 
         if (!dtb_out_path.empty()) {
