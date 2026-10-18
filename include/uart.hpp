@@ -141,4 +141,11 @@ private:
     // the shell's next read return EAGAIN. The original flags are saved here.
     int   saved_stdin_flags_ = -1;
     void* saved_termios_ = nullptr;  // struct termios, hidden to keep the header clean
+
+    // Windows console state (the original modes and code page), likewise hidden.
+    void* win_console_ = nullptr;
+
+    // Read whatever the host console has ready, without blocking: returns the
+    // number of bytes, 0 if nothing is waiting, or -1 at end of input.
+    long read_host(u8* buf, std::size_t capacity);
 };

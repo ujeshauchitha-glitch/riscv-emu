@@ -1,11 +1,16 @@
 #include "uart.hpp"
 
 #include <ostream>
+#include <string>
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
+#define UART_HOST_CONSOLE 1
+#elif defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #define UART_HOST_CONSOLE 1
 #endif
 
@@ -41,8 +46,90 @@ Uart::Uart(std::ostream& out) : out_(out) {}
 // into raw mode; the non-blocking read still works, which is what lets
 // `printf 'ls\n' | riscv_emu ...` drive the guest from a script.
 // ---------------------------------------------------------------------------
+#ifdef _WIN32
+namespace {
+// What to put back when the emulator exits.
+struct WinConsole {
+    HANDLE in = INVALID_HANDLE_VALUE;
+    HANDLE out = INVALID_HANDLE_VALUE;
+    bool   in_is_console = false;
+    bool   out_is_console = false;
+    DWORD  saved_in_mode = 0;
+    DWORD  saved_out_mode = 0;
+    UINT   saved_out_cp = 0;
+    wchar_t pending_high_surrogate = 0;
+};
+
+void append_utf8(std::string& out, unsigned codepoint) {
+    if (codepoint < 0x80) {
+        out += static_cast<char>(codepoint);
+    } else if (codepoint < 0x800) {
+        out += static_cast<char>(0xc0 | (codepoint >> 6));
+        out += static_cast<char>(0x80 | (codepoint & 0x3f));
+    } else if (codepoint < 0x10000) {
+        out += static_cast<char>(0xe0 | (codepoint >> 12));
+        out += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f));
+        out += static_cast<char>(0x80 | (codepoint & 0x3f));
+    } else {
+        out += static_cast<char>(0xf0 | (codepoint >> 18));
+        out += static_cast<char>(0x80 | ((codepoint >> 12) & 0x3f));
+        out += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f));
+        out += static_cast<char>(0x80 | (codepoint & 0x3f));
+    }
+}
+
+// A key the console reports as a virtual-key code rather than a character: the
+// arrows and friends. A Linux terminal sends these as escape sequences, so that
+// is what the guest has to receive for its shell's line editing to work.
+const char* escape_for(WORD vk) {
+    switch (vk) {
+        case VK_UP:     return "\x1b[A";
+        case VK_DOWN:   return "\x1b[B";
+        case VK_RIGHT:  return "\x1b[C";
+        case VK_LEFT:   return "\x1b[D";
+        case VK_HOME:   return "\x1b[H";
+        case VK_END:    return "\x1b[F";
+        case VK_INSERT: return "\x1b[2~";
+        case VK_DELETE: return "\x1b[3~";
+        case VK_PRIOR:  return "\x1b[5~";
+        case VK_NEXT:   return "\x1b[6~";
+        default:        return nullptr;
+    }
+}
+}  // namespace
+#endif
+
 void Uart::attach_host_stdin() {
-#ifdef UART_HOST_CONSOLE
+#if defined(_WIN32)
+    auto* c = new WinConsole{};
+    c->in  = GetStdHandle(STD_INPUT_HANDLE);
+    c->out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (c->in == nullptr || c->in == INVALID_HANDLE_VALUE) { delete c; return; }
+
+    // Input. Turn off everything the console does for itself - line editing,
+    // echo, Ctrl-C handling - so each keystroke reaches the guest as it is
+    // struck, and Ctrl-C reaches the guest's shell rather than killing us. (The
+    // Ctrl-A X escape is how you leave.)
+    DWORD mode = 0;
+    if (GetConsoleMode(c->in, &mode)) {
+        c->in_is_console = true;
+        c->saved_in_mode = mode;
+        SetConsoleMode(c->in, 0);
+    }
+
+    // Output. A Linux console speaks ANSI escape sequences - colours, cursor
+    // movement, clear-screen - and UTF-8; the Windows console understands both,
+    // but only once asked.
+    if (c->out != nullptr && c->out != INVALID_HANDLE_VALUE && GetConsoleMode(c->out, &mode)) {
+        c->out_is_console = true;
+        c->saved_out_mode = mode;
+        c->saved_out_cp = GetConsoleOutputCP();
+        SetConsoleMode(c->out, mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        SetConsoleOutputCP(CP_UTF8);
+    }
+    win_console_ = c;
+    host_stdin_ = true;
+#elif defined(UART_HOST_CONSOLE)
     const int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
     if (flags >= 0) {
         saved_stdin_flags_ = flags;
@@ -69,6 +156,76 @@ void Uart::attach_host_stdin() {
 #endif
 }
 
+long Uart::read_host(u8* buf, std::size_t capacity) {
+#if defined(_WIN32)
+    auto* c = static_cast<WinConsole*>(win_console_);
+    if (c == nullptr) return -1;
+
+    if (c->in_is_console) {
+        DWORD events = 0;
+        if (!GetNumberOfConsoleInputEvents(c->in, &events) || events == 0) return 0;
+
+        INPUT_RECORD records[32];
+        DWORD got = 0;
+        if (!ReadConsoleInputW(c->in, records, events < 32 ? events : 32, &got)) return -1;
+
+        std::string bytes;
+        for (DWORD i = 0; i < got; ++i) {
+            const INPUT_RECORD& r = records[i];
+            if (r.EventType != KEY_EVENT || !r.Event.KeyEvent.bKeyDown) continue;
+            const KEY_EVENT_RECORD& k = r.Event.KeyEvent;
+            const unsigned repeat = k.wRepeatCount ? k.wRepeatCount : 1;
+
+            for (unsigned n = 0; n < repeat; ++n) {
+                const wchar_t ch = k.uChar.UnicodeChar;
+                if (ch == 0) {
+                    if (const char* esc = escape_for(k.wVirtualKeyCode)) bytes += esc;
+                } else if (ch >= 0xd800 && ch <= 0xdbff) {
+                    c->pending_high_surrogate = ch;                     // wait for its partner
+                } else if (ch >= 0xdc00 && ch <= 0xdfff && c->pending_high_surrogate) {
+                    const unsigned cp = 0x10000 + ((c->pending_high_surrogate - 0xd800) << 10) + (ch - 0xdc00);
+                    c->pending_high_surrogate = 0;
+                    append_utf8(bytes, cp);
+                } else if (ch == 0x08) {
+                    bytes += '\x7f';       // Backspace: a Linux tty erases with DEL, not BS
+                } else {
+                    append_utf8(bytes, ch);
+                }
+            }
+        }
+        const std::size_t n = bytes.size() < capacity ? bytes.size() : capacity;
+        for (std::size_t i = 0; i < n; ++i) buf[i] = static_cast<u8>(bytes[i]);
+        // Bytes beyond `capacity` are dropped; the caller's buffer is generous
+        // and a single poll never sees more than a few keystrokes.
+        return static_cast<long>(n);
+    }
+
+    // Redirected input: a pipe, or a file.
+    DWORD available = 0;
+    if (PeekNamedPipe(c->in, nullptr, 0, nullptr, &available, nullptr)) {
+        if (available == 0) return 0;
+        DWORD got = 0;
+        const DWORD want = available < capacity ? available : static_cast<DWORD>(capacity);
+        if (!ReadFile(c->in, buf, want, &got, nullptr)) return -1;
+        return static_cast<long>(got);
+    }
+    if (GetLastError() == ERROR_BROKEN_PIPE) return -1;
+    // Not a pipe (a regular file): reads never block.
+    DWORD got = 0;
+    if (!ReadFile(c->in, buf, static_cast<DWORD>(capacity), &got, nullptr) || got == 0) return -1;
+    return static_cast<long>(got);
+#elif defined(UART_HOST_CONSOLE)
+    const ssize_t n = ::read(STDIN_FILENO, buf, capacity);
+    if (n > 0) return static_cast<long>(n);
+    if (n == 0) return -1;      // end of input
+    return 0;                   // EAGAIN: nothing typed yet
+#else
+    (void)buf;
+    (void)capacity;
+    return -1;
+#endif
+}
+
 void Uart::poll_host_input() {
 #ifdef UART_HOST_CONSOLE
     if (!host_stdin_ || host_stdin_eof_) return;
@@ -78,11 +235,11 @@ void Uart::poll_host_input() {
     // dozen bytes between polls comfortably.
     constexpr u8 CTRL_A = 0x01;
 
-    char buf[64];
-    const ssize_t n = ::read(STDIN_FILENO, buf, sizeof buf);
+    u8 buf[64];
+    const long n = read_host(buf, sizeof buf);
     if (n > 0) {
-        for (ssize_t i = 0; i < n; ++i) {
-            const u8 c = static_cast<u8>(buf[i]);
+        for (long i = 0; i < n; ++i) {
+            const u8 c = buf[i];
 
             if (escape_armed_) {
                 escape_armed_ = false;
@@ -99,7 +256,7 @@ void Uart::poll_host_input() {
             if (c == CTRL_A) { escape_armed_ = true; continue; }
             rx_.push_back(c);
         }
-    } else if (n == 0) {
+    } else if (n < 0) {
         // End of input. Stop polling: a closed stdin stays readable and would
         // otherwise return 0 forever, once per poll.
         host_stdin_eof_ = true;
@@ -108,7 +265,16 @@ void Uart::poll_host_input() {
 }
 
 Uart::~Uart() {
-#ifdef UART_HOST_CONSOLE
+#if defined(_WIN32)
+    if (auto* c = static_cast<WinConsole*>(win_console_)) {
+        if (c->in_is_console) SetConsoleMode(c->in, c->saved_in_mode);
+        if (c->out_is_console) {
+            SetConsoleMode(c->out, c->saved_out_mode);
+            SetConsoleOutputCP(c->saved_out_cp);
+        }
+        delete c;
+    }
+#elif defined(UART_HOST_CONSOLE)
     if (restore_termios_) {
         tcsetattr(STDIN_FILENO, TCSANOW, static_cast<termios*>(saved_termios_));
     }
