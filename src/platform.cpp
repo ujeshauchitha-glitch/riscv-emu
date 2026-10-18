@@ -19,15 +19,19 @@ Platform::Platform(Bus& bus, u32 num_harts) : bus_(bus) {
     // A single hart needs no peer list, and leaving it null keeps the
     // single-hart store path free of the reservation check.
     if (harts_.size() > 1) {
-        for (Cpu* h : harts_) {
-            h->harts       = &harts_;
-            h->idle_on_wfi = true;
-        }
-    } else {
-        // Idling pays even for one hart: a guest waiting in WFI lets the clock
-        // jump to its next timer deadline.
-        harts_[0]->idle_on_wfi = true;
+        for (Cpu* h : harts_) h->harts = &harts_;
     }
+
+    // WFI stays a no-op unless asked otherwise (set_idle_on_wfi, which a Linux
+    // boot turns on). The architecture lets WFI complete immediately, and
+    // software written against that - the official riscv-tests suite executes a
+    // WFI with nothing pending and expects to carry on - must keep working.
+    // Idling is a speed-up for a kernel that sleeps; it is not safe to impose on
+    // a bare-metal program.
+}
+
+void Platform::set_idle_on_wfi(bool on) {
+    for (Cpu* h : harts_) h->idle_on_wfi = on;
 }
 
 void Platform::wire(Clint* clint, Plic* plic, Uart* uart, u32 uart_irq, Syscon* syscon) {
@@ -43,6 +47,11 @@ void Platform::wire(Clint* clint, Plic* plic, Uart* uart, u32 uart_irq, Syscon* 
 }
 
 void Platform::enter_supervisor(u64 entry, u64 dtb_addr) {
+    // A kernel sleeps in WFI whenever it has nothing to run. Letting the hart
+    // really idle - and, when every hart does, skipping the clock to the next
+    // timer deadline - is what makes an idle Linux cost nothing.
+    set_idle_on_wfi(true);
+
     for (Cpu* h : harts_) {
         h->sbi_enabled = true;
 

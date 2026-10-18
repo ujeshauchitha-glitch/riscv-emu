@@ -69,6 +69,9 @@ public:
     // at a time with SBI's hart_start.
     void enter_supervisor(u64 entry, u64 dtb_addr);
 
+    // Make WFI genuinely idle the harts. Off by default - see the constructor.
+    void set_idle_on_wfi(bool on);
+
     // Instructions each hart runs per scheduling round.
     u64 quantum = 256;
 

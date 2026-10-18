@@ -104,6 +104,7 @@ struct Smp {
         platform = std::make_unique<Platform>(bus, harts);
         platform->quantum = quantum;
         platform->wire(clint, plic, nullptr, 0, syscon);
+        platform->set_idle_on_wfi(true);
     }
 
     u64 mem64(u64 addr) {
