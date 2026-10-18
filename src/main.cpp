@@ -14,6 +14,7 @@
 #include "dram.hpp"
 #include "elf_loader.hpp"
 #include "plic.hpp"
+#include "gdbstub.hpp"
 #include "platform.hpp"
 #include "rtc.hpp"
 #include "usernet.hpp"
@@ -50,6 +51,10 @@ void print_usage(const char* argv0) {
         << "                       for a big image, and the guest's writes persist in FILE\n"
         << "  --drive-snapshot FILE  like --drive, but writes are held in memory and FILE is\n"
         << "                       never modified\n"
+        << "\n"
+        << "  Debugging:\n"
+        << "  --gdb PORT           wait for gdb on PORT before running anything\n"
+        << "                       (then: gdb vmlinux -ex 'target remote :PORT'); 0 picks a port\n"
         << "\n"
         << "  Devices:\n"
         << "  --net user           a virtio network card on a built-in user-mode network:\n"
@@ -142,6 +147,8 @@ int main(int argc, char** argv) {
     bool        drive_snapshot = false;
     std::string net_mode;
     std::string net_dns;
+    bool        want_gdb = false;
+    u64         gdb_port = 0;
     bool        want_rng = false;
     bool        want_rtc = false;
     bool        rtc_fixed = false;
@@ -181,6 +188,13 @@ int main(int argc, char** argv) {
         else if (arg == "--net-dns") {
             if (i + 1 >= argc) { std::cerr << "error: --net-dns requires an IPv4 address\n"; return 2; }
             net_dns = argv[++i];
+        }
+        else if (arg == "--gdb") {
+            if (!next_value(gdb_port) || gdb_port > 65535) {
+                std::cerr << "error: --gdb wants a port number (0 to pick one)\n";
+                return 2;
+            }
+            want_gdb = true;
         }
         else if (arg == "--rng") want_rng = true;
         else if (arg == "--rtc") want_rtc = true;
@@ -488,7 +502,36 @@ int main(int argc, char** argv) {
     clint->instructions_per_tick = timer_divisor;
 
     u64    retired = 0;
-    Status st      = platform.run(max_steps, &retired);
+    Status st      = Status::good();
+    bool   debugger_ended_session = false;
+
+    if (want_gdb) {
+        // Nothing has executed yet. The machine is fully built and sitting at its
+        // first instruction, which is the state a debugger wants to find it in.
+        GdbStub stub(platform);
+        const u16 port = stub.listen(static_cast<u16>(gdb_port));
+        if (port == 0) {
+            std::cerr << "error: cannot listen for gdb on port " << gdb_port << "\n";
+            return 1;
+        }
+        std::cerr << "gdb: waiting for a debugger on port " << port
+                  << "  (gdb -ex 'target remote :" << port << "')\n";
+        if (!stub.accept_client()) {
+            std::cerr << "error: no debugger connected\n";
+            return 1;
+        }
+        std::cerr << "gdb: debugger connected\n";
+        const bool carry_on = stub.serve();
+        if (carry_on) {
+            std::cerr << "gdb: debugger detached; running on\n";
+            st = platform.run(max_steps, &retired);
+        } else {
+            retired = platform.retired();
+            debugger_ended_session = !platform.halted();
+        }
+    } else {
+        st = platform.run(max_steps, &retired);
+    }
 
     if (platform.htif_tohost_value != 0) {
         // The HTIF result convention used by riscv-tests: bit 0 marks the word
@@ -518,6 +561,8 @@ int main(int argc, char** argv) {
                   << " at pc 0x" << std::hex << faulting.pc << std::dec;
         if (smp > 1) std::cerr << " on hart " << platform.fault_hart();
         std::cerr << "\n";
+    } else if (debugger_ended_session) {
+        std::cerr << "\nthe debugger ended the session after " << retired << " instruction(s)\n";
     } else if (platform.stalled()) {
         std::cerr << "\nevery hart is idle and nothing can wake them (deadlock), after "
                   << retired << " instruction(s)\n";

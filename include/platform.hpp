@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -51,6 +52,7 @@ public:
     explicit Platform(Bus& bus, u32 num_harts = 1);
 
     u32  num_harts() const { return static_cast<u32>(harts_.size()); }
+    Bus& bus() { return bus_; }
     Cpu& hart(u32 i) { return *harts_[i]; }
     Cpu& boot_hart() { return *harts_[0]; }
 
@@ -78,6 +80,17 @@ public:
     // Run exactly one instruction on one hart, polling devices first. For a
     // debugger: it is the slow, precise path.
     Status step_hart(u32 hart);
+
+    // --- debugger support -------------------------------------------------------
+    //
+    // When set, this is called before every instruction with the hart about to
+    // run it; returning true stops the run before that instruction executes.
+    // Setting it also drops the scheduler to one instruction per turn so that
+    // nothing slips past: it is the slow path, used only while a debugger is
+    // attached. run() then returns normally and hook_stopped() says why.
+    std::function<bool(Cpu&)> before_step;
+    bool hook_stopped() const { return hook_stopped_; }
+    u32  hook_hart() const { return hook_hart_; }
 
     // Bring every hart's interrupt-pending bits up to date with the devices.
     void poll_devices();
@@ -110,6 +123,8 @@ private:
     Syscon* syscon_ = nullptr;
     u32     uart_irq_ = 0;
 
+    bool hook_stopped_ = false;
+    u32  hook_hart_    = 0;
     bool halted_       = false;
     bool user_quit_    = false;
     bool sbi_shutdown_ = false;

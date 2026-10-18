@@ -62,6 +62,7 @@ add_library(riscv_core STATIC
   src/rtc.cpp
   src/hostnet.cpp
   src/usernet.cpp
+  src/gdbstub.cpp
   src/trap.cpp
 )
 target_include_directories(riscv_core PUBLIC include)
@@ -96,6 +97,7 @@ set(RISCV_EMU_TESTS
   test_smp
   test_virtio
   test_usernet
+  test_gdbstub
 )
 
 # A throughput benchmark, built but deliberately not registered as a test: it

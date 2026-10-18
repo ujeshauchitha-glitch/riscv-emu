@@ -195,6 +195,7 @@ Status Platform::run(u64 max_steps, u64* steps_out) {
     // devices that keep waking a hart which then immediately sleeps again, must
     // end the run rather than spin the host forever.
     u64 idle_rounds = 0;
+    hook_stopped_ = false;
 
     while (retired_ < max_steps) {
         u64  round_max = 0;
@@ -213,8 +214,15 @@ Status Platform::run(u64 max_steps, u64* steps_out) {
             u64 budget = std::min(quantum, max_steps - retired_);
             u64 used   = 0;
             while (budget > 0) {
+                // A debugger gets to look at the hart before every instruction.
+                if (before_step && before_step(*h)) {
+                    hook_stopped_ = true;
+                    hook_hart_    = h->hartid;
+                    if (steps_out) *steps_out = retired_;
+                    return Status::good();
+                }
                 u64 done = 0;
-                Status st = h->run_core(budget, &done);
+                Status st = h->run_core(before_step ? 1 : budget, &done);
                 retired_ += done;
                 used     += done;
                 budget   -= std::min(budget, done);
