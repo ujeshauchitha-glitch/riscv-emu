@@ -491,6 +491,99 @@ registered.
 
 ---
 
-All nine phases are done. The emulator boots stock xv6 to an interactive shell
-and stock Linux 6.6 to an interactive prompt, and passes 125/125 riscv-tests
-across sixteen CTest suites.
+## Phase 10: more than one hart — done
+
+A `Platform` owns the harts and the shared devices and schedules the harts
+round-robin in deterministic quanta; the CLINT and PLIC become per-hart; SBI gains
+the HSM, IPI and remote-fence extensions; LR/SC reservations are cancelled by another
+hart's store; and an idle machine skips its clock to the next timer deadline.
+
+The bug worth recording: the first version of the scheduler polled devices once per
+quantum, and `trap_selftest` and `device_selftest` — which depend on a device write
+taking effect at the *next instruction* — gave different answers than the
+single-CPU emulator. A guest's own device access has to be a scheduling point
+(`Bus::mmio_epoch`), and a read of `mtime` has to include the instructions the reading
+hart has retired this round.
+
+Also found while wiring it up: `WFI` idling, applied unconditionally, would stall the
+official `riscv-tests` `wfi` test, which executes a `WFI` with nothing pending and
+expects to continue. Idling is now opt-in and only a Linux boot enables it.
+
+**Added:** `--smp`, `--quantum`; `tests/test_smp.cpp` (LR/SC, IPI and the idle
+clock-skip were mutation-checked).
+
+**Docs:** [`10-multiple-harts.md`](10-multiple-harts.md)
+
+---
+
+## Phase 11: devices for a real OS — done
+
+A shared virtio transport (descriptors treated as hostile input); a block device that
+walks chains of any shape, supports flush, and can keep a multi-gigabyte image on disk
+with persistent or snapshot writes; virtio-net over a `NetBackend`; **a user-mode
+network** (ARP, DHCP, ICMP to the gateway, UDP, DNS forwarding, and a TCP *proxy* that
+terminates the guest's connection and bridges it to a host socket — no privileges
+needed); virtio-rng; a goldfish RTC; and `/chosen/rng-seed`.
+
+Worth recording: an idle machine must not skip its clock past a network timeout while a
+reply is still expected, or the guest's DNS lookup "times out" in zero real seconds —
+devices report `io_pending()`. And on Windows, a machine with two MinGW installs loads
+the wrong `libstdc++-6.dll`; the program exits instantly with `0xc0000139`, or appears to
+hang a test runner on the loader's error dialog. The build now links statically.
+
+**Added:** `--drive`, `--drive-snapshot`, `--net`, `--net-dns`, `--rng`, `--rng-seed`,
+`--rtc`, `--rtc-fixed`; a Windows console for the UART; `tests/test_virtio.cpp`,
+`tests/test_usernet.cpp` (real loopback sockets, a full TCP connection; mutation-checked).
+
+**Docs:** [`11-virtio-and-networking.md`](11-virtio-and-networking.md)
+
+---
+
+## Phase 12: a GDB server — done
+
+`--gdb PORT`: registers, memory through the guest's page tables, breakpoints, write
+watchpoints, stepping, Ctrl-C, harts as threads, `monitor` commands. Breakpoints are the
+emulator's, not the guest's — nothing in guest memory is patched. The command handler
+touches no socket, so almost all of it is tested by feeding it the strings gdb sends.
+
+**Added:** `tests/test_gdbstub.cpp` (95 checks; breakpoints, watchpoints and register
+encoding mutation-checked; also driven against the real process by an independent client).
+Not tested against a real RISC-V-capable gdb — none was available.
+
+**Docs:** [`12-debugging-with-gdb.md`](12-debugging-with-gdb.md)
+
+---
+
+## Phase 13: Debian — pieces done, full boot not yet run
+
+`scripts/boot-debian.sh` builds a Debian 13 riscv64 root filesystem with `mmdebstrap`,
+builds a kernel configured for it, and boots both on the machine above. Every piece it
+depends on is tested. **The script itself has only been syntax-checked**: the development
+machine had no RISC-V cross-compiler and no WSL. Expect to meet something — the earlier
+phases are the evidence.
+
+**Docs:** [`13-booting-debian.md`](13-booting-debian.md), which lists what to look at first.
+
+---
+
+## Phase 14: speed, and the bit-manipulation extensions — done
+
+A decoded-instruction cache (invalidated by DMA as well as by `FENCE.I`), a direct-mapped
+TLB, a RAM fast path, and devices polled per round instead of per instruction: **17.1 →
+80.8 MIPS** under paging with devices. Zba, Zbb, Zbc, Zbs and Zicond — 45 instructions —
+checked against an independent Python model over 89,122 vectors, with 0 mismatches and
+four deliberate breakages each caught. The vector extension is not implemented.
+
+**Added:** `tests/bench_cpu.cpp`, `tests/gen_bitmanip_vectors.py`, `tests/test_bitmanip.cpp`,
+`--isa`.
+
+**Docs:** [`14-speed-and-extensions.md`](14-speed-and-extensions.md)
+
+---
+
+Phases 0–12 and 14 are done and 13 is built in pieces. The emulator boots stock xv6 to
+an interactive shell and stock Linux 6.6 to an interactive prompt, now on several harts,
+with a network, a clock and a debugger; the bundled tests are eighteen CTest suites plus
+the four bare-metal self-tests. (The official riscv-tests suite — 125/125 at the end of
+phase 9 — needs a RISC-V toolchain and has **not** been re-run since phase 10; CI runs
+it on every push.)

@@ -138,8 +138,24 @@ The format is detected from the file's magic number:
 | `--max-steps N` | stop after N instructions (default 100,000,000) |
 | `--dram-size-mb N` | guest RAM in MiB (default 128) |
 | `--timer-divisor N` | instructions per `mtime` tick (default 1) |
-| `--disk FILE` | back the virtio block device with FILE |
+| `--disk FILE` | back the virtio block device with FILE, read into memory; the guest's writes are discarded at exit |
+| `--drive FILE` | back the block device with FILE, **kept on disk**: no RAM cost for a big image, and the guest's writes persist |
+| `--drive-snapshot FILE` | like `--drive`, but writes are held in memory and FILE is never modified |
+| `--smp N` | number of harts (cores), default 1 |
+| `--quantum N` | instructions each hart runs per scheduling round (default 256) |
+| `--net user` | a virtio network card on the built-in user-mode network (DHCP, DNS, TCP and UDP out to the host's network, no setup) |
+| `--net loopback` | a network card whose transmitted frames come straight back |
+| `--net-dns IP` | the DNS server guest lookups are forwarded to (default: the host's) |
+| `--rng` | a virtio entropy source |
+| `--rng-seed N` | make the entropy (and the kernel's seed) reproducible |
+| `--rtc` | a real-time clock, so the guest knows today's date |
+| `--rtc-fixed SECONDS` | pin that clock to a Unix time |
+| `--isa STRING` | the `riscv,isa` string given to the kernel (default advertises everything implemented) |
+| `--gdb PORT` | wait for gdb on PORT before running anything (0 picks a port) |
 | `--help` | the same list |
+
+The Linux boot options (`--linux`, `--bootargs`, `--initrd`, `--dump-dtb`) are in
+[section 8](#8-boot-linux).
 
 Guest console output goes to **stdout**; the emulator's own diagnostics and the
 trace go to **stderr**. So this captures only what the guest printed:
@@ -493,13 +509,51 @@ dtc -I dtb -O dts /tmp/machine.dtb | head -40
 
 ---
 
+## 8b. Debian, several cores, a network, and a debugger
+
+```bash
+scripts/boot-debian.sh                  # Linux host or WSL2; builds the image and kernel first
+scripts/boot-debian.sh --smp 4 --mem 2048 --snapshot
+```
+
+See [`13-booting-debian.md`](13-booting-debian.md) for what it needs and what has and
+has not been verified. Doing it by hand, with a kernel `Image` and a root filesystem:
+
+```bash
+./build/riscv_emu --linux --smp 4 --dram-size-mb 1024 --rng --rtc \
+    --drive rootfs.ext4 --net user \
+    --bootargs "console=ttyS0 earlycon=sbi root=/dev/vda rootfstype=ext4 rw rootwait" \
+    Image
+```
+
+### Attaching a debugger
+
+```bash
+./build/riscv_emu --gdb 1234 --linux Image          # nothing has run yet
+gdb-multiarch vmlinux -ex 'set architecture riscv:rv64' -ex 'target remote :1234'
+(gdb) break start_kernel
+(gdb) continue
+(gdb) monitor harts
+```
+
+Details, and what a debugger can and cannot do here, in
+[`12-debugging-with-gdb.md`](12-debugging-with-gdb.md).
+
+### Measuring speed
+
+```bash
+./build/bench_cpu 40000000 platform paged devices
+```
+
+---
+
 ## 9. Run absolutely everything
 
 ```bash
 ./run-all.sh
 ```
 
-Builds from scratch, runs all sixteen suites, then runs the built-in demo and
+Builds from scratch, runs every suite, then runs the built-in demo and
 each self-test and reports what each produced. Useful after changing anything,
 and as a single command to check out a fresh clone with.
 
@@ -513,6 +567,6 @@ and as a single command to check out a fresh clone with.
 
 - [`../README.md`](../README.md) — what the project is and where it is going
 - [`PHASES.md`](PHASES.md) — the roadmap and what each phase delivered
-- The numbered design notes (`00-` … `09-`) explain *why* the emulator is built
+- The numbered design notes (`00-` … `14-`) explain *why* the emulator is built
   the way it is. Each records the state at the end of its phase; this page and
   the README always describe the present.

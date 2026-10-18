@@ -1,7 +1,8 @@
 # RISC-V Emulator
 
 An RV64 emulator written in modern C++20, built to boot a real operating system —
-**xv6-riscv** first, then **Linux**.
+**xv6-riscv** first, then **Linux**, then a full **Debian** with several cores, a
+network, and a debugger to attach to it.
 
 No dependencies: a C++20 compiler and CMake ≥ 3.16 are all you need.
 
@@ -66,8 +67,34 @@ rv64si  4/4    rv64uc  1/1    rv64uf 11/11   rv64ud 12/12
 125/125 passed
 ```
 
-**All nine phases done.** Stock unmodified xv6 boots to a shell and passes
+*(Measured at the end of phase 9. Phases 10–14 changed the main loop, the fetch path and the
+device layer, and the suite needs a RISC-V toolchain: it has not been re-run on the machine
+that phases 10–14 were developed on, though the four bare-metal self-tests it can run give the
+same results as before. CI runs the full suite on every push.)*
+
+**Phases 0–9 are done.** Stock unmodified xv6 boots to a shell and passes
 `usertests` in full; an unmodified Linux 6.6 kernel boots to a user process.
+
+**Phases 10–14 take it from "boots a kernel" to "runs a distribution":**
+
+- **Several harts** (`--smp N`), scheduled deterministically, with SBI hart
+  management, IPIs and remote fences, cross-hart LR/SC, and an idle machine that
+  skips its clock to the next deadline instead of burning instructions.
+- **Devices a real OS needs:** a general virtio transport; a block device that
+  handles multi-segment requests and keeps multi-gigabyte images on disk
+  (`--drive`, or `--drive-snapshot` to leave the image untouched); **virtio-net on
+  a built-in user-mode network** (DHCP, DNS, UDP, and TCP proxied to real host
+  sockets — no tap device or root); virtio-rng; an RTC; an entropy seed.
+- **A GDB server** (`--gdb PORT`): registers, memory through the guest's own page
+  tables, breakpoints, watchpoints, stepping, every hart as a thread.
+- **~4.7× faster** (17 → 81 MIPS under paging with devices): a decoded-instruction
+  cache, a direct-mapped TLB, a RAM fast path.
+- **Zba, Zbb, Zbc, Zbs and Zicond** — 45 instructions, verified against an
+  independent model over 89,122 vectors with 0 mismatches.
+- **`scripts/boot-debian.sh`**: builds a Debian riscv64 root filesystem and a
+  kernel for it, and boots them. See the caveat in
+  [`docs/13-booting-debian.md`](docs/13-booting-debian.md): everything it relies on
+  is tested, but a complete Debian boot has not been run end to end yet.
 
 [`docs/07-booting-xv6.md`](docs/07-booting-xv6.md) explains how the boot works
 and the two bugs that stood between "runs a kernel" and "boots xv6".
@@ -96,6 +123,14 @@ and the two bugs that stood between "runs a kernel" and "boots xv6".
 | **Device tree** — generated, `dtc`-validated | ✅ complete |
 | **SBI** — firmware services for a supervisor | ✅ complete |
 | **Boots Linux 6.6** to a user process | ✅ |
+| **SMP** — several harts, SBI HSM / IPI / remote fences, cross-hart LR/SC | ✅ |
+| **virtio** — shared transport; block (multi-segment, file-backed, snapshot), net, rng | ✅ |
+| **User-mode network** — ARP, DHCP, DNS, UDP, TCP proxy | ✅ |
+| **RTC**, entropy seed | ✅ |
+| **GDB remote protocol** server | ✅ |
+| **Zba / Zbb / Zbc / Zbs / Zicond** | ✅ |
+| **V** — vector extension | ❌ not implemented |
+| **Boots Debian** (`scripts/boot-debian.sh`) | ⚠️ components tested; full boot not yet run |
 
 Instructions that are not implemented yet raise an illegal-instruction trap
 rather than being silently mis-executed, so a program that needs them fails
@@ -114,13 +149,20 @@ try `ls`, `cat README`, `usertests`. Press **Ctrl-A then X** to leave (Ctrl-C
 goes to the guest). Needs a RISC-V toolchain: `apt-get install
 gcc-riscv64-unknown-elf`.
 
+**Boot Debian** (needs a Linux host or WSL2; see
+[`docs/13-booting-debian.md`](docs/13-booting-debian.md)):
+
+```bash
+./scripts/boot-debian.sh --smp 4
+```
+
 **Build and test everything:**
 
 ```bash
 ./run-all.sh
 ```
 
-Builds the project, runs all sixteen test suites, then runs the demo and every
+Builds the project, runs every test suite, then runs the demo and every
 self-test and reports what each produced. Use `--quick` to skip the clean
 rebuild.
 
@@ -147,6 +189,12 @@ cmake --build build
 # Boot xv6 by hand (scripts/boot-xv6.sh does all of this for you)
 ./build/riscv_emu --disk fs.img --max-steps 1000000000000 kernel/kernel
 
+# Four cores, a persistent disk, networking, a clock and entropy
+./build/riscv_emu --linux --smp 4 --drive debian.img --net user --rng --rtc Image
+
+# Wait for gdb on port 1234 before running anything
+./build/riscv_emu --gdb 1234 --linux Image
+
 # The bare-metal self-tests (built when a RISC-V toolchain is installed).
 # Each stops on ebreak with one bit set in a0 per passing check.
 ./build/riscv_emu --dump build/rv64i_selftest.bin   # expect a0 = 0x3fff
@@ -165,12 +213,14 @@ read a trace or a stop message when something goes wrong.
 cd build && ctest --output-on-failure
 ```
 
-Sixteen suites: unit tests for the decoder, the bus, the CPU, the RV64I
+Eighteen suites: unit tests for the decoder, the bus, the CPU, the RV64I
 instruction set, the CSR/trap machinery, the M/A extensions, the devices,
 supervisor mode with the MMU, the PLIC and virtio block device, the
-compressed-instruction decoder, floating point, and the device tree and SBI,
-plus four bare-metal self-tests
-assembled with a real RISC-V toolchain. The self-tests are skipped automatically
+compressed-instruction decoder, floating point, the device tree and SBI, **multiple
+harts, the virtio devices, the user-mode network (against real sockets), the GDB
+server, and the bit-manipulation extensions (against an independent Python model)** —
+plus four bare-metal self-tests assembled with a real RISC-V toolchain.
+`./build/bench_cpu` is a throughput benchmark, built but not run as a test. The self-tests are skipped automatically
 when no toolchain is present - to enable them:
 
 ```bash
@@ -212,6 +262,16 @@ include/          src/
   syscon.hpp        Poweroff / reboot                        syscon.cpp
   elf_loader.hpp    ELF64 image loading                      elf_loader.cpp
   mmu.hpp           Sv39 translation and the TLB             mmu.cpp
+  platform.hpp      Harts + shared devices, scheduling       platform.cpp
+  plic.hpp          External interrupts (per-hart contexts)  plic.cpp
+  virtio_mmio.hpp   The virtio transport                     virtio_mmio.cpp
+  virtio.hpp        Block device                             virtio.cpp
+  virtio_net.hpp    Network card, entropy source             virtio_net.cpp
+  usernet.hpp       User-mode network (DHCP/DNS/TCP proxy)   usernet.cpp
+  hostnet.hpp       Portable host sockets                    hostnet.cpp
+  rtc.hpp           Real-time clock                          rtc.cpp
+  gdbstub.hpp       GDB remote-protocol server               gdbstub.cpp
+  bitmanip.hpp      Zba/Zbb/Zbc/Zbs/Zicond arithmetic        cpu_bitmanip.cpp
                     Command line                             main.cpp
 
 examples/         Bare-metal assembly + linker script
@@ -230,7 +290,10 @@ guest kernels — which are linked expecting exactly this layout — can be boot
 | `0x0200_0000` | CLINT (timer, software interrupts) | ✅ |
 | `0x0C00_0000` | PLIC (external interrupts) | ✅ |
 | `0x1000_0000` | UART0 (NS16550A console) | ✅ |
-| `0x1000_1000` | virtio-mmio (block device) | ✅ |
+| `0x0010_1000` | RTC (goldfish) | ✅ with `--rtc` |
+| `0x1000_1000` | virtio-mmio: block device | ✅ |
+| `0x1000_2000` | virtio-mmio: network card | ✅ with `--net` |
+| `0x1000_3000` | virtio-mmio: entropy source | ✅ with `--rng` |
 | `0x8000_0000` | DRAM | ✅ |
 
 Addresses claimed by no device raise an access fault rather than reading zero,
@@ -250,9 +313,14 @@ so a kernel that jumps into the weeds stops immediately with a clear cause.
 | 7 | PLIC + virtio-blk — **boot xv6** | ✅ |
 | 8 | Linux prerequisites (C, F/D, DTB, SBI) | ✅ |
 | 9 | **Boot Linux** | ✅ |
+| 10 | Multiple harts | ✅ |
+| 11 | virtio, a network, a clock | ✅ |
+| 12 | A GDB server | ✅ |
+| 13 | Debian | ⚠️ built and tested in pieces; full boot not yet run |
+| 14 | Speed, and the bit-manipulation extensions | ✅ |
 
 Phase 7 was the milestone: xv6 boots to a shell. Phase 9 was the stretch, and
-Linux boots too.
+Linux boots too. Phases 10–14 build the machine a distribution expects.
 
 [`docs/PHASES.md`](docs/PHASES.md) has the detail behind each phase.
 
@@ -294,6 +362,18 @@ Each phase also ships an explainer alongside its code:
 - [`09-booting-linux.md`](docs/09-booting-linux.md) - four problems between
   phase 8 and a booting kernel, three of which were absent firmware rather than
   incorrect emulation
+- [`10-multiple-harts.md`](docs/10-multiple-harts.md) - why a CPU cannot run a
+  machine, deterministic scheduling, why a guest's own device access has to take
+  effect immediately, and cross-hart LR/SC
+- [`11-virtio-and-networking.md`](docs/11-virtio-and-networking.md) - one virtio
+  transport for every device, treating descriptors as hostile input, and a network
+  stack where TCP is a proxy
+- [`12-debugging-with-gdb.md`](docs/12-debugging-with-gdb.md) - breakpoints that
+  never touch guest memory, and a protocol handler with no socket in it
+- [`13-booting-debian.md`](docs/13-booting-debian.md) - what the script does, what
+  each piece of the machine is for, and an honest account of what has not been run
+- [`14-speed-and-extensions.md`](docs/14-speed-and-extensions.md) - a decode cache
+  that survives DMA, and differential testing against an independent model
 
 ## Goals
 
