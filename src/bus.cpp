@@ -52,6 +52,7 @@ Result<u64> Bus::load(u64 addr, unsigned size_bytes, AccessType type) const {
     if (dev == nullptr) {
         return Result<u64>::bad(access_fault_for(type), addr);
     }
+    ++mmio_epoch_;
 
     // A device claims the *starting* address, but a wide access could still run
     // past its end; the device's own bounds check catches that.
@@ -66,5 +67,6 @@ Status Bus::store(u64 addr, unsigned size_bytes, u64 value) {
     if (dev == nullptr) {
         return Status::bad(Exception::StoreAMOAccessFault, addr);
     }
+    ++mmio_epoch_;
     return dev->store(addr - dev->base(), size_bytes, value);
 }

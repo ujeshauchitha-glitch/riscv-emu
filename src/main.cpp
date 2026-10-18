@@ -12,6 +12,7 @@
 #include "dram.hpp"
 #include "elf_loader.hpp"
 #include "plic.hpp"
+#include "platform.hpp"
 #include "syscon.hpp"
 #include "types.hpp"
 #include "fdt.hpp"
@@ -34,6 +35,9 @@ void print_usage(const char* argv0) {
         << "  --max-steps N        stop after N instructions (default 100000000)\n"
         << "  --dram-size-mb N     guest RAM size in MiB (default 128)\n"
         << "  --timer-divisor N    instructions per mtime tick (default 1)\n"
+        << "  --smp N              number of harts (cores), default 1\n"
+        << "  --quantum N          instructions each hart runs per scheduling round\n"
+        << "                       (default 256); smaller is finer-grained, larger is faster\n"
         << "  --dump               dump registers when execution stops\n"
         << "  --disk FILE          back the virtio block device with FILE\n"
         << "\n"
@@ -108,6 +112,8 @@ int main(int argc, char** argv) {
     u64         max_steps     = 100'000'000;
     u64         dram_size_mb  = 128;
     u64         timer_divisor = 1;
+    u64         smp           = 1;
+    u64         quantum       = 256;
     bool        linux_boot    = false;
     std::string bootargs      = "console=ttyS0 earlycon=sbi";
     std::string initrd_path;
@@ -147,6 +153,8 @@ int main(int argc, char** argv) {
         else if (arg == "--max-steps")     { if (!next_value(max_steps)) return 2; }
         else if (arg == "--dram-size-mb")  { if (!next_value(dram_size_mb)) return 2; }
         else if (arg == "--timer-divisor") { if (!next_value(timer_divisor)) return 2; }
+        else if (arg == "--smp")           { if (!next_value(smp)) return 2; }
+        else if (arg == "--quantum")       { if (!next_value(quantum)) return 2; }
         else if (!arg.empty() && arg[0] == '-') {
             std::cerr << "error: unknown option " << arg << "\n";
             print_usage(argv[0]);
@@ -154,8 +162,12 @@ int main(int argc, char** argv) {
         } else image_path = arg;
     }
 
-    if (dram_size_mb == 0 || timer_divisor == 0) {
-        std::cerr << "error: --dram-size-mb and --timer-divisor must be at least 1\n";
+    if (dram_size_mb == 0 || timer_divisor == 0 || quantum == 0) {
+        std::cerr << "error: --dram-size-mb, --timer-divisor and --quantum must be at least 1\n";
+        return 2;
+    }
+    if (smp == 0 || smp > Clint::MAX_HARTS) {
+        std::cerr << "error: --smp must be between 1 and " << Clint::MAX_HARTS << "\n";
         return 2;
     }
 
@@ -165,11 +177,11 @@ int main(int argc, char** argv) {
     auto  dram_owned = std::make_unique<Dram>(dram_size_mb * 1024 * 1024);
     Dram* dram = dram_owned.get();
     auto  uart_owned = std::make_unique<Uart>(std::cout);
-    auto  clint_owned = std::make_unique<Clint>();
+    auto  clint_owned = std::make_unique<Clint>(static_cast<u32>(smp));
     Clint* clint = clint_owned.get();
     auto  syscon_owned = std::make_unique<Syscon>();
     Syscon* syscon = syscon_owned.get();
-    auto  plic_owned = std::make_unique<Plic>();
+    auto  plic_owned = std::make_unique<Plic>(static_cast<u32>(smp));
     Plic* plic = plic_owned.get();
     auto  virtio_owned = std::make_unique<VirtioBlk>();
     VirtioBlk* virtio = virtio_owned.get();
@@ -297,8 +309,13 @@ int main(int argc, char** argv) {
                       << " bytes at 0x" << std::hex << initrd_start << std::dec << ")\n";
         }
 
-        const std::vector<u8> dtb =
-            Fdt::build(dram_bytes, bootargs, initrd_start, initrd_end);
+        FdtConfig fdt_config;
+        fdt_config.dram_bytes   = dram_bytes;
+        fdt_config.bootargs     = bootargs;
+        fdt_config.initrd_start = initrd_start;
+        fdt_config.initrd_end   = initrd_end;
+        fdt_config.harts        = static_cast<u32>(smp);
+        const std::vector<u8> dtb = Fdt::build(fdt_config);
 
         if (!dtb_out_path.empty()) {
             std::ofstream out(dtb_out_path, std::ios::binary);
@@ -323,65 +340,28 @@ int main(int argc, char** argv) {
         }
     }
 
-    Cpu cpu(bus);
-    cpu.trace  = trace;
-    cpu.pc     = entry;
-    cpu.clint  = clint;
-    cpu.syscon = syscon;
-    cpu.htif_tohost_addr = tohost;
-    cpu.plic     = plic;
-    cpu.uart     = uart;
-    cpu.uart_irq = UART0_IRQ;
+    Platform platform(bus, static_cast<u32>(smp));
+    platform.quantum = quantum;
+    platform.wire(clint, plic, uart, UART0_IRQ, syscon);
+    platform.htif_tohost_addr = tohost;
 
+    // On bare metal every hart comes out of reset at the same address and sorts
+    // itself out by reading mhartid, as on real hardware.
+    for (u32 i = 0; i < platform.num_harts(); ++i) {
+        platform.hart(i).trace = trace;
+        platform.hart(i).pc    = entry;
+    }
     if (linux_boot) {
         // Enter the kernel the way OpenSBI would: in supervisor mode, with the
         // hart ID in a0 and the device tree in a1, and with SBI available for
-        // the things supervisor mode cannot do for itself.
-        cpu.priv = PRIV_SUPERVISOR;
-        cpu.write_reg(10, 0);          // a0 = hartid
-        cpu.write_reg(11, dtb_addr);   // a1 = device tree
-        cpu.sbi_enabled = true;
-
-        // Delegate every trap to supervisor mode.
-        //
-        // This is firmware's job, and there is no firmware here to do it. A
-        // trap taken in S-mode goes to M-mode unless the matching medeleg bit
-        // is set - so without this, the kernel's very first page fault (the
-        // fetch immediately after it enables paging, which is *designed* to
-        // fault so that execution lands on the virtual-address continuation at
-        // stvec) is delivered to mtvec instead. mtvec is zero, so the machine
-        // vectors to address 0, faults on that fetch too, and loops forever
-        // with nothing on the console.
-        //
-        // OpenSBI writes exactly this before its own mret into the kernel.
-        cpu.csrs.write(csr::MEDELEG, 0xffff);
-        cpu.csrs.write(csr::MIDELEG, 0xffff);
-
-        // Let the supervisor see its own timer and external interrupts. mie is
-        // machine-only, so a kernel cannot enable these for itself - firmware
-        // does it on the way in.
-        cpu.csrs.write(csr::MIE, csr::MIP_SEIP | csr::MIP_STIP | csr::MIP_SSIP);
-
-        // Let supervisor and user code read the counters.
-        //
-        // `rdtime` is an ordinary instruction to a kernel - Linux's udelay() is
-        // built on it - but reading the time CSR from a lower privilege level
-        // is illegal unless the level above has enabled it. Nothing here has,
-        // so udelay traps on its first instruction and the kernel spins in its
-        // own illegal-instruction handler. Firmware enables them on the way in;
-        // this does the same.
-        cpu.csrs.write(csr::MCOUNTEREN, 0xffffffff);
-        cpu.csrs.write(csr::SCOUNTEREN, 0xffffffff);
-
-        // Linux installs stvec early but not instantly, and it delegates
-        // nothing to itself - so the "no handler installed" guard, which is a
-        // debugging aid rather than architectural behaviour, would fire on the
-        // first page fault of the boot. A kernel with real firmware underneath
-        // it would simply take the trap.
-        cpu.trap_fatal_without_handler = false;
+        // the things supervisor mode cannot do for itself. Secondary harts are
+        // parked until the kernel starts them.
+        platform.enter_supervisor(entry, dtb_addr);
 
         std::cerr << "device tree at 0x" << std::hex << dtb_addr << std::dec
-                  << ", entering supervisor mode\n\n";
+                  << ", entering supervisor mode";
+        if (smp > 1) std::cerr << " (" << smp << " harts)";
+        std::cerr << "\n\n";
     }
 
     // The console becomes bidirectional here. Everything before this point
@@ -390,43 +370,54 @@ int main(int argc, char** argv) {
     clint->instructions_per_tick = timer_divisor;
 
     u64    retired = 0;
-    Status st      = cpu.run(max_steps, &retired);
+    Status st      = platform.run(max_steps, &retired);
 
-    if (cpu.htif_tohost_value != 0) {
+    if (platform.htif_tohost_value != 0) {
         // The HTIF result convention used by riscv-tests: bit 0 marks the word
         // as valid, and the rest is the failing check's number (0 = all passed).
-        const u64 code = cpu.htif_tohost_value >> 1;
+        const u64 code = platform.htif_tohost_value >> 1;
         if (code == 0) {
             std::cerr << "\nPASS after " << retired << " instruction(s)\n";
         } else {
             std::cerr << "\nFAIL: test " << code << " failed, after " << retired
                       << " instruction(s)\n";
         }
-    } else if (cpu.sbi_shutdown) {
+    } else if (platform.sbi_shutdown()) {
         std::cerr << "\nguest requested shutdown through SBI, after " << retired
                   << " instruction(s)\n";
-    } else if (cpu.user_quit) {
+    } else if (platform.user_quit()) {
         std::cerr << "\nleft the machine after " << retired << " instruction(s)\n";
-    } else if (cpu.halted) {
+    } else if (platform.halted()) {
         std::cerr << "\nmachine powered off after " << retired << " instruction(s)";
         if (syscon->exit_code() != 0) std::cerr << " (exit code " << syscon->exit_code() << ")";
         std::cerr << "\n";
     } else if (!st) {
+        const Cpu& faulting = platform.hart(platform.fault_hart());
         std::cerr << "\nstopped after " << retired << " instruction(s): "
                   << exception_name(st.trap.cause)
                   << " (cause " << st.trap.cause_code()
                   << ", tval 0x" << std::hex << st.trap.tval << std::dec << ")"
-                  << " at pc 0x" << std::hex << cpu.pc << std::dec << "\n";
+                  << " at pc 0x" << std::hex << faulting.pc << std::dec;
+        if (smp > 1) std::cerr << " on hart " << platform.fault_hart();
+        std::cerr << "\n";
+    } else if (platform.stalled()) {
+        std::cerr << "\nevery hart is idle and nothing can wake them (deadlock), after "
+                  << retired << " instruction(s)\n";
     } else {
         std::cerr << "\nstep budget exhausted after " << retired << " instruction(s)\n";
     }
 
-    if (dump) cpu.dump_registers(std::cout);
-
-    if (cpu.htif_tohost_value != 0) {
-        return (cpu.htif_tohost_value >> 1) == 0 ? 0 : 1;
+    if (dump) {
+        for (u32 i = 0; i < platform.num_harts(); ++i) {
+            if (platform.num_harts() > 1) std::cout << "--- hart " << i << " ---\n";
+            platform.hart(i).dump_registers(std::cout);
+        }
     }
-    if (cpu.user_quit) return 0;
-    if (cpu.halted) return static_cast<int>(syscon->exit_code());
+
+    if (platform.htif_tohost_value != 0) {
+        return (platform.htif_tohost_value >> 1) == 0 ? 0 : 1;
+    }
+    if (platform.user_quit()) return 0;
+    if (platform.halted()) return static_cast<int>(syscon->exit_code());
     return st ? 0 : 1;
 }

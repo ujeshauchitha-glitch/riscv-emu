@@ -1,6 +1,7 @@
 #include "fdt.hpp"
 
 #include <cstring>
+#include <string>
 
 namespace {
 
@@ -18,7 +19,9 @@ constexpr u32 FDT_END        = 9;
 // carries so other nodes can refer to it - the device tree's equivalent of a
 // pointer. Devices name the controller their interrupt line goes to.
 constexpr u32 PHANDLE_PLIC = 1;
-constexpr u32 PHANDLE_CPU0_INTC = 2;
+// Each hart's local interrupt controller needs its own phandle. They start well
+// clear of the small fixed ones above and below.
+constexpr u32 PHANDLE_CPU_INTC_BASE = 0x100;
 
 // Everything in a device tree is big-endian, including on a little-endian
 // machine. Writing these by hand without a helper is the single most common way
@@ -171,6 +174,21 @@ std::vector<u8> Fdt::finish() {
 
 std::vector<u8> Fdt::build(u64 dram_bytes, const std::string& bootargs,
                            u64 initrd_start, u64 initrd_end) {
+    FdtConfig c;
+    c.dram_bytes   = dram_bytes;
+    c.bootargs     = bootargs;
+    c.initrd_start = initrd_start;
+    c.initrd_end   = initrd_end;
+    return build(c);
+}
+
+std::vector<u8> Fdt::build(const FdtConfig& config) {
+    const u64         dram_bytes   = config.dram_bytes;
+    const std::string& bootargs    = config.bootargs;
+    const u64         initrd_start = config.initrd_start;
+    const u64         initrd_end   = config.initrd_end;
+    const u32         harts        = config.harts == 0 ? 1 : config.harts;
+
     Fdt t;
 
     t.begin_node("");
@@ -215,24 +233,24 @@ std::vector<u8> Fdt::build(u64 dram_bytes, const std::string& bootargs,
     // is a claim about how fast the emulator runs, and the guest's idea of
     // wall-clock time is only as good as this estimate.
     t.prop_u32("timebase-frequency", 10000000);
-    t.begin_node("cpu@0");
-    t.prop_string("device_type", "cpu");
-    t.prop_u32("reg", 0);
-    t.prop_string("status", "okay");
-    t.prop_string("compatible", "riscv");
-    // The ISA string is how Linux discovers what it may use. It must match what
-    // the emulator actually implements: claim more and the kernel executes an
-    // instruction that traps, claim less and it takes a slower path for no
-    // reason.
-    t.prop_string("riscv,isa", "rv64imafdc_zicsr_zifencei");
-    t.prop_string("mmu-type", "riscv,sv39");
-    t.begin_node("interrupt-controller");
-    t.prop_u32("#interrupt-cells", 1);
-    t.prop_empty("interrupt-controller");
-    t.prop_string("compatible", "riscv,cpu-intc");
-    t.prop_u32("phandle", PHANDLE_CPU0_INTC);
-    t.end_node();
-    t.end_node();
+    // One node per hart. Linux brings the others up through SBI's hart_start,
+    // naming each by the `reg` value here.
+    for (u32 h = 0; h < harts; ++h) {
+        t.begin_node("cpu@" + std::to_string(h));
+        t.prop_string("device_type", "cpu");
+        t.prop_u32("reg", h);
+        t.prop_string("status", "okay");
+        t.prop_string("compatible", "riscv");
+        t.prop_string("riscv,isa", config.isa);
+        t.prop_string("mmu-type", "riscv,sv39");
+        t.begin_node("interrupt-controller");
+        t.prop_u32("#interrupt-cells", 1);
+        t.prop_empty("interrupt-controller");
+        t.prop_string("compatible", "riscv,cpu-intc");
+        t.prop_u32("phandle", PHANDLE_CPU_INTC_BASE + h);
+        t.end_node();
+        t.end_node();
+    }
     t.end_node();
 
     // --- /soc: the memory-mapped devices -------------------------------------
@@ -261,13 +279,49 @@ std::vector<u8> Fdt::build(u64 dram_bytes, const std::string& bootargs,
     t.prop_u32("interrupts", VIRTIO0_IRQ);
     t.end_node();
 
+    // Optional virtio devices, one 4 KiB slot each.
+    if (config.virtio_net) {
+        t.begin_node("virtio_mmio@10002000");
+        t.prop_stringlist("compatible", {"virtio,mmio"});
+        t.prop_reg("reg", VIRTIO_NET_BASE, 0x1000);
+        t.prop_u32("interrupt-parent", PHANDLE_PLIC);
+        t.prop_u32("interrupts", VIRTIO_NET_IRQ);
+        t.end_node();
+    }
+    if (config.virtio_rng) {
+        t.begin_node("virtio_mmio@10003000");
+        t.prop_stringlist("compatible", {"virtio,mmio"});
+        t.prop_reg("reg", VIRTIO_RNG_BASE, 0x1000);
+        t.prop_u32("interrupt-parent", PHANDLE_PLIC);
+        t.prop_u32("interrupts", VIRTIO_RNG_IRQ);
+        t.end_node();
+    }
+    if (config.rtc) {
+        // Wall-clock time. Without it a guest boots into 1970, and anything
+        // that checks certificate or repository validity (apt, TLS) refuses to
+        // work.
+        t.begin_node("rtc@101000");
+        t.prop_stringlist("compatible", {"google,goldfish-rtc"});
+        t.prop_reg("reg", RTC_BASE, 0x1000);
+        t.prop_u32("interrupt-parent", PHANDLE_PLIC);
+        t.prop_u32("interrupts", RTC_IRQ);
+        t.end_node();
+    }
+
     // The timer and software-interrupt block. Its `interrupts-extended` names
     // the per-hart controller twice, once for the software interrupt (3) and
     // once for the timer (7) - the two things a hart raises for itself.
     t.begin_node("clint@2000000");
     t.prop_stringlist("compatible", {"sifive,clint0", "riscv,clint0"});
     t.prop_reg("reg", CLINT_BASE, 0x10000);
-    t.prop_cells("interrupts-extended", {PHANDLE_CPU0_INTC, 3, PHANDLE_CPU0_INTC, 7});
+    {
+        std::vector<u32> cells;
+        for (u32 h = 0; h < harts; ++h) {
+            cells.push_back(PHANDLE_CPU_INTC_BASE + h); cells.push_back(3);   // software
+            cells.push_back(PHANDLE_CPU_INTC_BASE + h); cells.push_back(7);   // timer
+        }
+        t.prop_cells("interrupts-extended", cells);
+    }
     t.end_node();
 
     // The external interrupt controller. Context 1 is this hart's supervisor
@@ -278,7 +332,17 @@ std::vector<u8> Fdt::build(u64 dram_bytes, const std::string& bootargs,
     t.prop_stringlist("compatible", {"sifive,plic-1.0.0", "riscv,plic0"});
     t.prop_empty("interrupt-controller");
     t.prop_reg("reg", PLIC_BASE, 0x400000);
-    t.prop_cells("interrupts-extended", {PHANDLE_CPU0_INTC, 11, PHANDLE_CPU0_INTC, 9});
+    {
+        // Two contexts per hart, in order: machine external (cause 11), then
+        // supervisor external (cause 9). The position in this list *is* the
+        // context number, which is why it matches the PLIC's 2h / 2h+1 layout.
+        std::vector<u32> cells;
+        for (u32 h = 0; h < harts; ++h) {
+            cells.push_back(PHANDLE_CPU_INTC_BASE + h); cells.push_back(11);
+            cells.push_back(PHANDLE_CPU_INTC_BASE + h); cells.push_back(9);
+        }
+        t.prop_cells("interrupts-extended", cells);
+    }
     t.prop_u32("riscv,ndev", 31);
     t.prop_u32("phandle", PHANDLE_PLIC);
     t.end_node();

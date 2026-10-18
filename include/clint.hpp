@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "csr.hpp"
 #include "device.hpp"
 #include "types.hpp"
@@ -25,6 +27,11 @@
 //   0x4000 + hart*8   mtimecmp
 //   0xBFF8            mtime
 //
+// **One mtime, one mtimecmp and one msip per hart.** mtime is the machine-wide
+// clock all harts share; the other two are per-hart, which is how a single
+// timer block gives each core its own deadline and lets one core interrupt
+// another (an IPI is a write of 1 to the target's msip).
+//
 // mtime advances with retired instructions rather than wall-clock time. That
 // makes runs reproducible - the same program takes the same interrupt at the
 // same instruction every time - which matters enormously when debugging why a
@@ -32,6 +39,12 @@
 // ---------------------------------------------------------------------------
 class Clint : public Device {
 public:
+    static constexpr u32 MAX_HARTS = 32;
+
+    // `harts` is how many cores this block serves. The default of one keeps the
+    // single-hart machine, and every test written against it, unchanged.
+    explicit Clint(u32 harts = 1);
+
     u64         base() const override { return CLINT_BASE; }
     u64         size() const override { return 0x10000; }
     const char* name() const override { return "clint"; }
@@ -39,7 +52,9 @@ public:
     Result<u64> load(u64 offset, unsigned size_bytes) override;
     Status      store(u64 offset, unsigned size_bytes, u64 value) override;
 
-    // Advance the timer. Called once per retired instruction.
+    u32 harts() const { return harts_; }
+
+    // Advance the timer. Called once per retired instruction, or in a batch.
     // One mtime tick every `instructions_per_tick` instructions.
     //
     // This used to add `ticks_per_instruction` per instruction, which is the
@@ -48,20 +63,50 @@ public:
     // ticks per instruction instead, so a guest that armed a deadline N ticks
     // ahead was interrupted a hundred times sooner. Asking for slower ticks
     // produced an interrupt storm.
-    void tick() {
-        if (instructions_per_tick <= 1) { ++mtime_; return; }
-        if (++subtick_ >= instructions_per_tick) {
-            subtick_ = 0;
-            ++mtime_;
-        }
+    void tick() { tick(1); }
+    void tick(u64 instructions) {
+        if (instructions_per_tick <= 1) { mtime_ += instructions; return; }
+        subtick_ += instructions;
+        mtime_   += subtick_ / instructions_per_tick;
+        subtick_ %= instructions_per_tick;
     }
 
-    // Drive MTIP and MSIP in mip to match the device's state. Interrupt pending
-    // bits are owned by the device, not by software: a guest cannot clear MTIP
-    // by writing mip, only by moving mtimecmp forward.
-    void update(CsrFile& csrs) const;
+    // Drive MTIP and MSIP in `hart`'s mip to match the device's state. Interrupt
+    // pending bits are owned by the device, not by software: a guest cannot
+    // clear MTIP by writing mip, only by moving mtimecmp forward.
+    void update(CsrFile& csrs, u32 hart = 0) const;
 
+    // The clock as of the last scheduling round. This is what the timer
+    // comparison uses.
     u64 mtime() const { return mtime_; }
+
+    // The clock as the *running hart* sees it: the round's base plus the
+    // instructions that hart has retired since the round began.
+    //
+    // A machine with several harts advances the shared clock once per
+    // scheduling round, not once per instruction. A guest reading the time
+    // between two such updates would see it frozen - a delay loop spinning on
+    // rdtime would not finish until the round ended, and two back-to-back reads
+    // of mtime would return the same value, which no real clock does. So the
+    // platform names the running hart's retired-instruction counter, and a read
+    // adds how far it has got. With no source set (the single-CPU path, which
+    // ticks every instruction) this is just mtime().
+    u64 mtime_now() const {
+        if (live_instret_ == nullptr) return mtime_;
+        const u64 ipt = instructions_per_tick ? instructions_per_tick : 1;
+        return mtime_ + (*live_instret_ - *live_round_start_) / ipt;
+    }
+    void set_live_source(const u64* instret, const u64* round_start) {
+        live_instret_ = instret;
+        live_round_start_ = round_start;
+    }
+
+    // Jump the clock forward (never back). Used when every hart is idle in WFI:
+    // there is nothing to execute until the next deadline, so rather than
+    // burning host time retiring nothing the clock skips straight to it.
+    void advance_to(u64 t) { if (t > mtime_) { mtime_ = t; subtick_ = 0; } }
+
+    u64 mtimecmp(u32 hart) const { return hart < harts_ ? mtimecmp_[hart] : ~0ull; }
 
     // Set the timer deadline on behalf of a supervisor, and clear the pending
     // timer interrupt.
@@ -72,25 +117,34 @@ public:
     // interrupt that just fired is still pending, and if it is not cleared when
     // the new deadline is set the kernel re-enters its timer handler
     // immediately and never makes progress.
-    void set_timer(u64 deadline, CsrFile& csrs) {
-        mtimecmp_ = deadline;
+    void set_timer(u64 deadline, CsrFile& csrs, u32 hart = 0) {
+        if (hart >= harts_) return;
+        mtimecmp_[hart] = deadline;
 
         // Both pending bits, because from here on this deadline belongs to the
         // supervisor - see `sbi_timer_` below.
         csrs.clear_interrupt(csr::MIP_MTIP);
         csrs.clear_interrupt(csr::MIP_STIP);
-        sbi_timer_ = true;
+        sbi_timer_[hart] = 1;
     }
 
-    // How fast the clock runs relative to instruction retirement. Larger values
-    // make each timer tick cover more instructions.
+    // Raise or lower another hart's machine software interrupt. This is the
+    // mechanism behind an IPI.
+    void set_msip(u32 hart, bool on) { if (hart < harts_) msip_[hart] = on ? 1 : 0; }
+    bool msip(u32 hart) const { return hart < harts_ && msip_[hart] != 0; }
+
     // How many retired instructions make one mtime tick. 1 - the default -
     // means the timer advances once per instruction, which is what makes a run
-    // reproducible: the timer fires at the same instruction every time.
+    // reproducible: the timer fires at the same instruction every time. Larger
+    // values make each timer tick cover more instructions.
     u64 instructions_per_tick = 1;
 
 private:
-    // Has a supervisor armed this timer through SBI?
+    u32 harts_;
+    const u64* live_instret_     = nullptr;
+    const u64* live_round_start_ = nullptr;
+
+    // Has a supervisor armed this hart's timer through SBI?
     //
     // mtimecmp is a machine-mode register, so its expiry naturally raises
     // MTIP - a *machine* timer interrupt. A supervisor cannot enable that: mie
@@ -102,13 +156,13 @@ private:
     // Real firmware handles the machine timer interrupt and posts a supervisor
     // one in its place. That is what this flag models: once the timer has been
     // armed through SBI, its expiry is delivered as STIP.
-    bool sbi_timer_ = false;
+    std::vector<u8> sbi_timer_;
 
     u64 subtick_  = 0;   // instructions since the last mtime tick
     u64 mtime_    = 0;
     // Reset value 0 means the timer is already "expired", so MTIP asserts
     // immediately - which is exactly what real hardware does, and why every
     // kernel sets mtimecmp before enabling the timer interrupt.
-    u64 mtimecmp_ = 0;
-    u32 msip_     = 0;
+    std::vector<u64> mtimecmp_;
+    std::vector<u32> msip_;
 };

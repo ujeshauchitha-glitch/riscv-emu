@@ -51,6 +51,15 @@ constexpr i64 SUCCESS          = 0;
 constexpr i64 ERR_FAILED       = -1;
 constexpr i64 ERR_NOT_SUPPORTED = -2;
 constexpr i64 ERR_INVALID_PARAM = -3;
+constexpr i64 ERR_DENIED        = -4;
+constexpr i64 ERR_INVALID_ADDRESS = -5;
+constexpr i64 ERR_ALREADY_AVAILABLE = -6;
+constexpr i64 ERR_ALREADY_STARTED = -7;
+constexpr i64 ERR_ALREADY_STOPPED = -8;
+
+// Hart states reported by the HSM extension's hart_get_status.
+constexpr u64 HART_STARTED = 0;
+constexpr u64 HART_STOPPED = 1;
 
 // Handle an ECALL from supervisor mode as an SBI call. Returns true if it was
 // handled - in which case the CPU must resume after the ecall rather than

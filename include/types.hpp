@@ -49,10 +49,20 @@ constexpr u64 CLINT_BASE  = 0x0200'0000;
 constexpr u64 PLIC_BASE   = 0x0c00'0000;
 constexpr u64 UART0_BASE  = 0x1000'0000;
 constexpr u64 VIRTIO_BASE = 0x1000'1000;
+// Further virtio-mmio devices follow at 4 KiB strides with consecutive IRQs,
+// exactly as on the QEMU virt machine: slot n lives at VIRTIO_BASE + n * 0x1000
+// and raises PLIC source 1 + n.
+constexpr u64 VIRTIO_STRIDE   = 0x1000;
+constexpr u64 VIRTIO_NET_BASE = VIRTIO_BASE + 1 * VIRTIO_STRIDE;
+constexpr u64 VIRTIO_RNG_BASE = VIRTIO_BASE + 2 * VIRTIO_STRIDE;
+constexpr u64 RTC_BASE        = 0x0010'1000;   // goldfish real-time clock
 constexpr u64 DRAM_BASE   = 0x8000'0000;
 
 // Interrupt numbers on the PLIC, matching the QEMU virt machine.
 constexpr u32 VIRTIO0_IRQ = 1;
+constexpr u32 VIRTIO_NET_IRQ = 2;
+constexpr u32 VIRTIO_RNG_IRQ = 3;
+constexpr u32 RTC_IRQ        = 11;
 constexpr u32 UART0_IRQ   = 10;
 
 // Default guest RAM size. 128 MiB is comfortably more than xv6 needs and enough

@@ -51,9 +51,20 @@ public:
     // to register the pages it has cached decoded instructions from.
     Dram* ram() const { return ram_; }
 
+    // How many accesses have gone to a device other than RAM.
+    //
+    // A guest that touches a device may have changed an interrupt line - written
+    // msip, enabled an interrupt in the PLIC, claimed one, sent a byte to the
+    // UART. The machine only polls devices between scheduling rounds, so
+    // without this a guest would see its own MMIO write take effect up to a
+    // whole round late. A hart watches this counter and ends its round early
+    // when it moves, so the devices are re-polled straight away.
+    u64 mmio_epoch() const { return mmio_epoch_; }
+
 private:
     std::vector<std::unique_ptr<Device>> devices_;
     Dram* ram_ = nullptr;
+    mutable u64 mmio_epoch_ = 0;
 };
 
 // The access fault cause corresponding to an access type.

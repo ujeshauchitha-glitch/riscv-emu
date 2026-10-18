@@ -33,8 +33,36 @@
 // attached with, so it cannot drift out of agreement with them.
 // ---------------------------------------------------------------------------
 
+// Everything the generated device tree needs to know about the machine.
+struct FdtConfig {
+    u64         dram_bytes = DRAM_SIZE_DEFAULT;
+    std::string bootargs;
+    u64         initrd_start = 0;
+    u64         initrd_end   = 0;
+
+    // Number of harts. Each gets its own /cpus/cpu@N node with its own interrupt
+    // controller, and the CLINT and PLIC list one entry per hart (two for the
+    // PLIC: a machine-mode context and a supervisor-mode one).
+    u32         harts = 1;
+
+    // Optional devices. A node for a device the machine does not have would make
+    // the kernel probe hardware that is not there, so each is included only on
+    // request.
+    bool        virtio_net = false;
+    bool        virtio_rng = false;
+    bool        rtc        = false;
+
+    // The ISA string is how Linux discovers what it may use. It must match what
+    // the emulator actually implements: claim more and the kernel executes an
+    // instruction that traps, claim less and it takes a slower path for no
+    // reason.
+    std::string isa = "rv64imafdc_zicsr_zifencei";
+};
+
 class Fdt {
 public:
+    static std::vector<u8> build(const FdtConfig& config);
+
     // Build a device tree describing this machine: one hart, `dram_bytes` of
     // memory at DRAM_BASE, and the CLINT, PLIC, UART and virtio-mmio devices.
     //

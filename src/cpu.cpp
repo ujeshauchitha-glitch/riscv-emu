@@ -97,7 +97,22 @@ Status Cpu::mem_store(u64 vaddr, unsigned size, u64 value) {
 
     Result<u64> pa = mmu.translate(vaddr, AccessType::Store, data_privilege(), csrs);
     if (!pa) return Status::bad(pa.trap);
-    return bus_.store(pa.value, size, value);
+    Status st = bus_.store(pa.value, size, value);
+    if (harts != nullptr && st) [[unlikely]] note_store(pa.value, size);
+    return st;
+}
+
+void Cpu::note_store(u64 paddr, unsigned size) {
+    // Reservations are tracked at 8-byte granularity. The architecture allows a
+    // larger granule (a cache line), which only ever makes an SC fail in more
+    // cases, never fewer - and a spurious failure is always legal.
+    const u64 first = paddr >> 3;
+    const u64 last  = (paddr + size - 1) >> 3;
+    for (Cpu* h : *harts) {
+        if (h == this || !h->reservation_valid_) continue;
+        const u64 g = h->reservation_paddr_ >> 3;
+        if (g >= first && g <= last) h->reservation_valid_ = false;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +220,7 @@ Status Cpu::step() {
     // instruction late.
     if (clint) {
         clint->tick();
-        clint->update(csrs);
+        clint->update(csrs, hartid);
     }
 
     // Sample the UART's level-triggered line, then let the PLIC arbitrate
@@ -220,9 +235,13 @@ Status Cpu::step() {
 
     if (plic) {
         if (uart) plic->set_pending(uart_irq, uart->interrupting());
-        plic->update(csrs);
+        plic->update(csrs, hartid);
     }
 
+    return step_core();
+}
+
+Status Cpu::step_core() {
     // Interrupts are checked before the fetch, not after the instruction.
     // An interrupt is not caused by the instruction at the PC - it is an
     // external event that happens *between* instructions, so the instruction
@@ -450,6 +469,41 @@ bool Cpu::next_interrupt(Interrupt& out) const {
     if (candidates & csr::MIP_SSIP) { out = Interrupt::SupervisorSoftware; return true; }
     if (candidates & csr::MIP_STIP) { out = Interrupt::SupervisorTimer;    return true; }
     return false;
+}
+
+Status Cpu::run_core(u64 max_steps, u64* steps_out) {
+    u64 n = 0;
+    device_touched = false;
+    const u64 mmio_before = bus_.mmio_epoch();
+    for (; n < max_steps; ++n) {
+        // A WFI parks the hart until something it has enabled becomes pending.
+        // Checking here rather than at the WFI itself means the wait also ends
+        // on an interrupt that arrives between scheduling rounds.
+        if (waiting_for_interrupt && !runnable()) break;
+
+        Status st = step_core();
+        if (!st) {
+            if (steps_out) *steps_out = n;
+            return st;
+        }
+        if (halted || parked) { ++n; break; }
+        if (bus_.mmio_epoch() != mmio_before) { device_touched = true; ++n; break; }
+    }
+    if (steps_out) *steps_out = n;
+    return Status::good();
+}
+
+void Cpu::start_at(u64 addr, u64 opaque) {
+    parked = false;
+    waiting_for_interrupt = false;
+    priv = PRIV_SUPERVISOR;
+    pc = addr;
+    csrs.write(csr::SATP, 0);                       // translation off
+    csrs.set_mstatus(csrs.mstatus() & ~(csr::MSTATUS_SIE | csr::MSTATUS_SPIE));
+    write_reg(10, hartid);                          // a0 = hartid
+    write_reg(11, opaque);                          // a1 = opaque
+    clear_reservation();
+    remote_fence();
 }
 
 Status Cpu::run(u64 max_steps, u64* steps_out) {
@@ -1419,8 +1473,13 @@ Status Cpu::execute_system(const DecodedInst& inst) {
             // The spec explicitly permits implementing WFI as a no-op: it is a
             // hint, and software must treat its completion as advisory and
             // re-check the condition it was waiting on. Running the loop hot
-            // costs us nothing but host CPU. Phase 4 can make it genuinely idle
-            // once there is a timer to sleep until.
+            // costs us nothing but host CPU.
+            //
+            // A multi-hart Platform sets idle_on_wfi, because there it pays:
+            // a sleeping core is skipped by the scheduler, and when every core
+            // sleeps the clock jumps to the next deadline instead of retiring
+            // millions of empty loop iterations.
+            if (idle_on_wfi) waiting_for_interrupt = true;
             return Status::good();
 
         default:
@@ -1604,7 +1663,7 @@ Result<u64> Cpu::csr_read(u32 addr) const {
     // `time` is not a counter the hart keeps: it is a window onto the CLINT's
     // mtime, which is the machine-wide clock every hart shares.
     if (addr == csr::TIME && clint) {
-        return Result<u64>::good(clint->mtime());
+        return Result<u64>::good(clint->mtime_now());
     }
 
     return Result<u64>::good(csrs.read(addr));
@@ -1925,6 +1984,10 @@ Status Cpu::execute_amo(const DecodedInst& inst) {
 
         reservation_valid_ = true;
         reservation_addr_  = addr;
+        // The load just succeeded, so this translation is a TLB hit and cannot
+        // fault. It is only needed to compare against other harts' stores.
+        Result<u64> lpa = mmu.translate(addr, AccessType::Load, data_privilege(), csrs);
+        reservation_paddr_ = lpa ? lpa.value : addr;
         write_reg(inst.rd, (size == 4) ? sext32(static_cast<u32>(r.value)) : r.value);
         return Status::good();
     }

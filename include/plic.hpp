@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <vector>
 
 #include "csr.hpp"
 #include "device.hpp"
@@ -29,13 +30,17 @@
 //
 // **Contexts.** A context is one (hart, privilege level) pair, each with its own
 // enable bits and threshold, so machine-mode firmware and a supervisor kernel
-// can be interested in different devices. For hart 0: context 0 is M-mode,
-// context 1 is S-mode. xv6 uses context 1.
+// can be interested in different devices. Hart h owns contexts 2h (M-mode) and
+// 2h+1 (S-mode): for hart 0, context 0 is M-mode and context 1 is S-mode - xv6
+// uses context 1 - and with more harts the numbering simply continues.
 // ---------------------------------------------------------------------------
 class Plic : public Device {
 public:
     static constexpr u32 MAX_IRQS = 64;      // more than enough for this machine
-    static constexpr u32 NUM_CONTEXTS = 2;   // hart 0 M-mode and S-mode
+
+    // `harts` is how many cores the controller serves; the default of one keeps
+    // the single-hart machine (and its tests) exactly as it was.
+    explicit Plic(u32 harts = 1);
 
     u64         base() const override { return PLIC_BASE; }
     u64         size() const override { return 0x400000; }
@@ -48,8 +53,10 @@ public:
     // level-triggered: a source stays pending while its line is asserted.
     void set_pending(u32 irq, bool asserted);
 
-    // Drive MEIP/SEIP in mip from each context's state.
-    void update(CsrFile& csrs) const;
+    // Drive MEIP/SEIP in `hart`'s mip from that hart's two contexts.
+    void update(CsrFile& csrs, u32 hart = 0) const;
+
+    u32 num_contexts() const { return static_cast<u32>(contexts_.size()); }
 
 private:
     std::array<u32, MAX_IRQS> priority_{};
@@ -66,7 +73,7 @@ private:
         u64 enabled = 0;   // bitmap
         u32 threshold = 0;
     };
-    std::array<Context, NUM_CONTEXTS> contexts_{};
+    std::vector<Context> contexts_;
 
     // The highest-priority IRQ this context should be told about, or 0 for
     // none. IRQ 0 is reserved precisely so that zero can mean "nothing".
@@ -79,7 +86,7 @@ private:
     u32 scan(u32 context) const;
     void recompute() const;
 
-    mutable std::array<u32, NUM_CONTEXTS> best_{};
+    mutable std::vector<u32> best_;
     mutable bool dirty_ = true;
     void invalidate() { dirty_ = true; }
 

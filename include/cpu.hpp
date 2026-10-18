@@ -73,7 +73,33 @@ public:
     AluBackend*     alu_backend = nullptr;
 
     // Run one instruction. Returns OK, or the trap the instruction raised.
+    //
+    // This is the self-contained single-hart step: it first services the
+    // devices this CPU was wired to (timer, UART, interrupt controller) and
+    // then runs step_core(). A multi-hart Platform does not use it - it polls
+    // the shared devices once per scheduling round and calls step_core() or
+    // run_core() directly.
     Status step();
+
+    // One instruction with no device servicing: check for a pending interrupt,
+    // then fetch, decode and execute. Everything that does not depend on
+    // another part of the machine happens here.
+    Status step_core();
+
+    // Run up to `max_steps` instructions with step_core(), stopping early on a
+    // fatal trap, a halt request, or - when idle_on_wfi is set - a WFI with
+    // nothing pending. `steps_out` receives how many instructions retired.
+    Status run_core(u64 max_steps, u64* steps_out);
+
+    // Set by run_core() when it returned early because the guest touched a
+    // device. The caller should poll the devices and call run_core() again.
+    bool device_touched = false;
+
+    // The instruction count at the start of the current scheduling round. The
+    // shared clock only advances between rounds, so the CLINT adds the
+    // instructions this hart has retired since then when it is read (see
+    // Clint::mtime_now).
+    u64 round_start_instret = 0;
 
     // Run until a trap occurs or `max_steps` instructions have retired.
     // Returns the trap that stopped execution, or OK if the step budget ran
@@ -149,6 +175,57 @@ public:
 
     // Set when a syscon poweroff or reboot stops the run.
     bool halted = false;
+
+    // --- multi-hart support ----------------------------------------------------
+    //
+    // A Platform with more than one hart numbers them, links them together, and
+    // schedules them. None of this is touched on a single-hart machine, so the
+    // original single-CPU use costs nothing extra.
+
+    // This hart's number: what mhartid reads, and what firmware passes a
+    // starting hart in a0.
+    u32 hartid = 0;
+
+    // Every hart of the machine, indexed by hartid, this one included - or null
+    // for a single-hart machine. Borrowed. Harts need each other for exactly
+    // three things: an IPI raises a bit in another hart's mip, a remote fence
+    // flushes another hart's caches, and a store has to cancel another hart's
+    // LR/SC reservation.
+    const std::vector<Cpu*>* harts = nullptr;
+
+    // A hart that is not running: it has not been started yet, or it stopped
+    // itself. Secondary harts come out of reset parked, and SBI's hart_start
+    // call is what releases them. The scheduler skips parked harts entirely.
+    bool parked = false;
+
+    // Make WFI genuinely idle the hart instead of being a no-op. A Platform sets
+    // this so that sleeping cores cost nothing and, when *every* core sleeps,
+    // the clock can jump straight to the next deadline. Off by default, because
+    // the spec allows WFI to be a no-op and single-CPU tests rely on that.
+    bool idle_on_wfi = false;
+    bool waiting_for_interrupt = false;
+
+    // Can this hart execute an instruction right now? False if parked, or if it
+    // is waiting in WFI and nothing it has enabled is pending. Also clears the
+    // wait when an interrupt has arrived.
+    bool runnable() {
+        if (parked) return false;
+        if (waiting_for_interrupt) {
+            if (csrs.pending_enabled() == 0) return false;
+            waiting_for_interrupt = false;   // woken - spec: even if SIE is clear
+        }
+        return true;
+    }
+
+    // Release this hart at `addr`, the way SBI's hart_start does: supervisor
+    // mode, translation off, interrupts off, a0 = its own hart id, a1 = the
+    // caller's opaque value. Everything else is whatever the platform's
+    // firmware setup already established.
+    void start_at(u64 addr, u64 opaque);
+
+    // Another hart asked for this one's TLB and decoded-instruction cache to be
+    // dropped (SBI remote fence).
+    void remote_fence() { mmu.flush(); flush_decode_cache(); }
 
     // SBI: firmware services for a supervisor.
     //
@@ -235,6 +312,15 @@ private:
     // else can write memory behind our back.
     bool reservation_valid_ = false;
     u64  reservation_addr_  = 0;
+
+    // The same reservation as a physical address, which is what another hart's
+    // store has to be compared against: the two harts may reach one location
+    // through different virtual addresses.
+    u64 reservation_paddr_ = 0;
+
+    // A store to `paddr` just completed on this hart. Any other hart holding a
+    // reservation on that location loses it, so its SC fails.
+    void note_store(u64 paddr, unsigned size);
 
     // One handler per major opcode group.
     Status execute_op_imm(const DecodedInst& inst);     // ADDI, SLTI, ... SRAI

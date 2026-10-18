@@ -97,6 +97,11 @@ public:
     // exposed now so the logic lives with the device.
     bool interrupting() const;
 
+    // Is a host input source attached and still open? A machine whose every
+    // hart is idle uses this to decide whether waiting is hopeless (nothing can
+    // ever wake it) or merely slow (somebody might yet type).
+    bool host_input_active() const { return host_stdin_ && !host_stdin_eof_; }
+
 private:
     std::ostream&   out_;
     std::deque<u8>  rx_;

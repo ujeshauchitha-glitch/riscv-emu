@@ -12,6 +12,9 @@ constexpr u64 THRESHOLD_OFF  = 0x0;        // within a context block
 constexpr u64 CLAIM_OFF      = 0x4;
 }  // namespace
 
+Plic::Plic(u32 harts)
+    : contexts_(2 * (harts == 0 ? 1 : harts)), best_(contexts_.size(), 0) {}
+
 void Plic::set_pending(u32 irq, bool asserted) {
     if (irq == 0 || irq >= MAX_IRQS) return;
     const u64 bit = 1ull << irq;
@@ -24,17 +27,17 @@ void Plic::set_pending(u32 irq, bool asserted) {
 }
 
 void Plic::recompute() const {
-    for (u32 ctx = 0; ctx < NUM_CONTEXTS; ++ctx) best_[ctx] = scan(ctx);
+    for (u32 ctx = 0; ctx < num_contexts(); ++ctx) best_[ctx] = scan(ctx);
     dirty_ = false;
 }
 
 u32 Plic::best_irq(u32 context) const {
     if (dirty_) recompute();
-    return context < NUM_CONTEXTS ? best_[context] : 0;
+    return context < num_contexts() ? best_[context] : 0;
 }
 
 u32 Plic::scan(u32 context) const {
-    if (context >= NUM_CONTEXTS) return 0;
+    if (context >= num_contexts()) return 0;
     const Context& c = contexts_[context];
 
     // A claimed IRQ is masked until completed, which is what stops a
@@ -53,14 +56,14 @@ u32 Plic::scan(u32 context) const {
     return best;
 }
 
-void Plic::update(CsrFile& csrs) const {
-    // Context 0 drives the machine-mode external interrupt, context 1 the
-    // supervisor one.
-    if (best_irq(0) != 0) csrs.raise_interrupt(csr::MIP_MEIP);
-    else                  csrs.clear_interrupt(csr::MIP_MEIP);
+void Plic::update(CsrFile& csrs, u32 hart) const {
+    // A hart's even context drives its machine-mode external interrupt and the
+    // odd one its supervisor external interrupt.
+    if (best_irq(2 * hart) != 0) csrs.raise_interrupt(csr::MIP_MEIP);
+    else                         csrs.clear_interrupt(csr::MIP_MEIP);
 
-    if (best_irq(1) != 0) csrs.raise_interrupt(csr::MIP_SEIP);
-    else                  csrs.clear_interrupt(csr::MIP_SEIP);
+    if (best_irq(2 * hart + 1) != 0) csrs.raise_interrupt(csr::MIP_SEIP);
+    else                             csrs.clear_interrupt(csr::MIP_SEIP);
 }
 
 u32 Plic::claim(u32 context) {
@@ -115,13 +118,13 @@ Result<u64> Plic::load(u64 offset, unsigned size_bytes) {
     if (offset >= ENABLE_BASE && offset < CONTEXT_BASE) {
         const u64 ctx = (offset - ENABLE_BASE) / 0x80;
         const u64 word = ((offset - ENABLE_BASE) % 0x80) / 4;
-        if (ctx >= NUM_CONTEXTS || word >= 2) return Result<u64>::good(0);
+        if (ctx >= num_contexts() || word >= 2) return Result<u64>::good(0);
         return Result<u64>::good(static_cast<u32>(contexts_[ctx].enabled >> (word * 32)));
     }
     if (offset >= CONTEXT_BASE) {
         const u64 ctx = (offset - CONTEXT_BASE) / CONTEXT_STRIDE;
         const u64 within = (offset - CONTEXT_BASE) % CONTEXT_STRIDE;
-        if (ctx >= NUM_CONTEXTS) return Result<u64>::good(0);
+        if (ctx >= num_contexts()) return Result<u64>::good(0);
         if (within == THRESHOLD_OFF) return Result<u64>::good(contexts_[ctx].threshold);
         if (within == CLAIM_OFF)     return Result<u64>::good(claim(static_cast<u32>(ctx)));
     }
@@ -142,7 +145,7 @@ Status Plic::store(u64 offset, unsigned size_bytes, u64 value) {
     if (offset >= ENABLE_BASE && offset < CONTEXT_BASE) {
         const u64 ctx = (offset - ENABLE_BASE) / 0x80;
         const u64 word = ((offset - ENABLE_BASE) % 0x80) / 4;
-        if (ctx < NUM_CONTEXTS && word < 2) {
+        if (ctx < num_contexts() && word < 2) {
             const u64 mask = 0xffff'ffffull << (word * 32);
             contexts_[ctx].enabled =
                 (contexts_[ctx].enabled & ~mask) | (static_cast<u64>(v) << (word * 32));
@@ -153,7 +156,7 @@ Status Plic::store(u64 offset, unsigned size_bytes, u64 value) {
     if (offset >= CONTEXT_BASE) {
         const u64 ctx = (offset - CONTEXT_BASE) / CONTEXT_STRIDE;
         const u64 within = (offset - CONTEXT_BASE) % CONTEXT_STRIDE;
-        if (ctx < NUM_CONTEXTS) {
+        if (ctx < num_contexts()) {
             if (within == THRESHOLD_OFF) { contexts_[ctx].threshold = v; invalidate(); }
             // Writing the claim register is the "complete" half of the
             // handshake: the handler is telling us it is finished with that IRQ.

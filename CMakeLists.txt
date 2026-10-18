@@ -38,6 +38,7 @@ add_library(riscv_core STATIC
   src/sbi.cpp
   src/mmu.cpp
   src/plic.cpp
+  src/platform.cpp
   src/decoder.cpp
   src/dram.cpp
   src/syscon.cpp
@@ -69,6 +70,7 @@ set(RISCV_EMU_TESTS
   test_float
   test_firmware
   test_backends
+  test_smp
 )
 
 # A throughput benchmark, built but deliberately not registered as a test: it

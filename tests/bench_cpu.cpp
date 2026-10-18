@@ -9,6 +9,8 @@
 //   ./build/bench_cpu 40000000 paged     # S-mode under Sv39, so every access translates
 //   ./build/bench_cpu 40000000 devices   # CLINT + PLIC + UART attached, as in a real boot
 //   ./build/bench_cpu 40000000 paged devices
+//   ./build/bench_cpu 40000000 platform  # run through the Platform scheduler (what riscv_emu does)
+//   ./build/bench_cpu 40000000 platform devices
 //
 // "paged" and "devices" matter because they are what a real boot looks like: a
 // kernel runs with translation on and the per-step device polling live, and a
@@ -29,6 +31,7 @@
 #include "csr.hpp"
 #include "machine.hpp"
 #include "mmu.hpp"
+#include "platform.hpp"
 #include "plic.hpp"
 #include "uart.hpp"
 
@@ -36,10 +39,11 @@ using namespace rvt;
 
 int main(int argc, char** argv) {
     const u64 steps = argc > 1 ? std::strtoull(argv[1], nullptr, 0) : 40'000'000;
-    bool paged = false, devices = false;
+    bool paged = false, devices = false, use_platform = false;
     for (int i = 2; i < argc; ++i) {
         if (!std::strcmp(argv[i], "paged")) paged = true;
         else if (!std::strcmp(argv[i], "devices")) devices = true;
+        else if (!std::strcmp(argv[i], "platform")) use_platform = true;
     }
 
     // x5 = scratch address (a few KiB into DRAM, clear of the code), x6 = counter.
@@ -63,6 +67,51 @@ int main(int argc, char** argv) {
     const i32 back = -static_cast<i32>((prog.size() - loop) * 4);
     prog.push_back(b_type(opcodes::BRANCH, 0x1, 12, 0, back)); // bne x12,x0,loop
     prog.push_back(JAL(0, -static_cast<i32>((prog.size() - loop) * 4)));
+
+    if (use_platform) {
+        // The same program, but scheduled by the Platform exactly as riscv_emu
+        // runs it: devices polled once per round rather than once per step.
+        Bus bus;
+        auto dram = std::make_unique<Dram>(kTestDramSize);
+        Dram* dram_ptr = dram.get();
+        bus.attach(std::move(dram));
+        std::vector<u8> bytes;
+        for (u32 w : prog) for (int b = 0; b < 4; ++b) bytes.push_back(static_cast<u8>(w >> (8 * b)));
+        dram_ptr->load_image(DRAM_BASE, bytes);
+
+        auto clint = std::make_unique<Clint>();
+        auto plic  = std::make_unique<Plic>();
+        auto uart  = std::make_unique<Uart>(std::cout);
+        Clint* clint_ptr = clint.get();
+        Plic*  plic_ptr  = plic.get();
+        Uart*  uart_ptr  = uart.get();
+        if (devices) {
+            bus.attach(std::move(clint));
+            bus.attach(std::move(plic));
+            bus.attach(std::move(uart));
+        }
+        Platform platform(bus, 1);
+        if (devices) platform.wire(clint_ptr, plic_ptr, uart_ptr, UART0_IRQ, nullptr);
+        if (paged) {
+            const u64 root = DRAM_BASE + 0x20000;
+            const u64 leaf = ((DRAM_BASE >> 12) << 10) | pte::V | pte::R | pte::W | pte::X |
+                             pte::A | pte::D;
+            dram_ptr->store(root - DRAM_BASE + 2 * 8, 8, leaf);
+            platform.boot_hart().csrs.write(csr::SATP, (8ull << 60) | (root >> 12));
+            platform.boot_hart().priv = PRIV_SUPERVISOR;
+            platform.boot_hart().trap_fatal_without_handler = false;
+        }
+        const auto p0 = std::chrono::steady_clock::now();
+        u64 done = 0;
+        Status pst = platform.run(steps, &done);
+        const auto p1 = std::chrono::steady_clock::now();
+        const double psecs = std::chrono::duration<double>(p1 - p0).count();
+        std::printf("%s [platform]%s%s: %llu instructions in %.3f s = %.1f MIPS\n",
+                    pst ? "ok" : "TRAPPED", paged ? " [paged]" : "", devices ? " [devices]" : "",
+                    static_cast<unsigned long long>(done), psecs,
+                    static_cast<double>(done) / psecs / 1e6);
+        return pst ? 0 : 1;
+    }
 
     Machine m(prog);
 

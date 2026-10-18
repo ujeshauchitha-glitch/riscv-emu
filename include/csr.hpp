@@ -329,6 +329,10 @@ public:
     // Direct, unmasked access for devices (the CLINT drives MTIP and MSIP, the
     // PLIC drives MEIP) and for tests.
     void raise_interrupt(u64 mip_bit)  { raw_[csr::MIP] |= mip_bit; }
+
+    // mhartid is read-only to software, so the machine that builds the harts
+    // numbers them through here.
+    void set_hartid(u64 id) { raw_[csr::MHARTID] = id; }
     void clear_interrupt(u64 mip_bit)  { raw_[csr::MIP] &= ~mip_bit; }
 
     // Advance the retired-instruction and cycle counters by one.
