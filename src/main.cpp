@@ -1,6 +1,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <random>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -62,6 +63,7 @@ void print_usage(const char* argv0) {
         << "  --net loopback       a network card whose transmitted frames come straight back\n"
         << "  --net-dns IP         the DNS server the guest's lookups are forwarded to\n"
         << "  --rng                a virtio entropy source (a Debian boot waits for one)\n"
+        << "  --rng-seed N         make the entropy (and the seed handed to the kernel) reproducible\n"
         << "  --rtc                a real-time clock, so the guest knows today's date\n"
         << "  --rtc-fixed SECONDS  pin the clock to a Unix time instead of the host's\n"
         << "\n"
@@ -153,6 +155,8 @@ int main(int argc, char** argv) {
     bool        want_gdb = false;
     u64         gdb_port = 0;
     bool        want_rng = false;
+    bool        rng_seeded = false;
+    u64         rng_seed_value = 0;
     bool        want_rtc = false;
     bool        rtc_fixed = false;
     u64         rtc_fixed_seconds = 0;
@@ -204,6 +208,10 @@ int main(int argc, char** argv) {
             isa_override = argv[++i];
         }
         else if (arg == "--rng") want_rng = true;
+        else if (arg == "--rng-seed") {
+            if (!next_value(rng_seed_value)) return 2;
+            rng_seeded = true;
+        }
         else if (arg == "--rtc") want_rtc = true;
         else if (arg == "--rtc-fixed") {
             if (!next_value(rtc_fixed_seconds)) return 2;
@@ -331,6 +339,7 @@ int main(int argc, char** argv) {
     }
     if (want_rng) {
         auto rng = std::make_unique<VirtioRng>();
+        if (rng_seeded) rng->seed(rng_seed_value);
         rng->attach(&bus, plic, VIRTIO_RNG_IRQ);
         if (!bus.attach(std::move(rng))) {
             std::cerr << "error: cannot attach the entropy device\n";
@@ -454,6 +463,12 @@ int main(int argc, char** argv) {
         fdt_config.virtio_net   = static_cast<bool>(net_backend);
         fdt_config.virtio_rng   = want_rng;
         fdt_config.rtc          = want_rtc;
+        {
+            // 32 bytes for /chosen/rng-seed: from the host's entropy source, or from
+            // --rng-seed when a reproducible boot is wanted.
+            std::mt19937_64 gen(rng_seeded ? rng_seed_value : (static_cast<u64>(std::random_device{}()) << 32) ^ std::random_device{}());
+            for (int i = 0; i < 32; ++i) fdt_config.rng_seed.push_back(static_cast<u8>(gen() >> 24));
+        }
         if (!isa_override.empty()) fdt_config.isa = isa_override;
         const std::vector<u8> dtb = Fdt::build(fdt_config);
 

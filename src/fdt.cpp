@@ -119,6 +119,14 @@ void Fdt::prop_stringlist(const std::string& name,
     pad_to_4(structure_);
 }
 
+void Fdt::prop_bytes(const std::string& name, const std::vector<u8>& bytes) {
+    push_be32(structure_, FDT_PROP);
+    push_be32(structure_, static_cast<u32>(bytes.size()));
+    push_be32(structure_, intern(name));
+    structure_.insert(structure_.end(), bytes.begin(), bytes.end());
+    pad_to_4(structure_);
+}
+
 void Fdt::prop_cells(const std::string& name, const std::vector<u32>& cells) {
     push_be32(structure_, FDT_PROP);
     push_be32(structure_, static_cast<u32>(cells.size() * 4));
@@ -207,6 +215,7 @@ std::vector<u8> Fdt::build(const FdtConfig& config) {
     // and a device tree node describing the UART, but no reason to believe that
     // particular UART is the console.
     t.prop_string("stdout-path", "/soc/serial@10000000");
+    if (!config.rng_seed.empty()) t.prop_bytes("rng-seed", config.rng_seed);
     if (initrd_end > initrd_start) {
         // 64-bit, not 32. With more than 4 GiB of guest RAM the initramfs is
         // placed above the 4 GiB line, and a 32-bit property truncates that to

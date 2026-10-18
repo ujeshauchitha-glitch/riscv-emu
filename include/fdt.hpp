@@ -48,6 +48,14 @@ struct FdtConfig {
     // Optional devices. A node for a device the machine does not have would make
     // the kernel probe hardware that is not there, so each is included only on
     // request.
+    // Random bytes for /chosen/rng-seed. Linux credits these to its entropy pool
+    // at boot when it trusts the bootloader (the default), which is what lets a
+    // userspace that blocks until the pool is ready - systemd, ssh key
+    // generation - get going. An emulated machine executes the same instruction
+    // stream every run and has almost nothing of its own to gather entropy from,
+    // so without a seed from outside it can wait a very long time.
+    std::vector<u8> rng_seed;
+
     bool        virtio_net = false;
     bool        virtio_rng = false;
     bool        rtc        = false;
@@ -95,6 +103,7 @@ private:
     void prop_stringlist(const std::string& name,
                          const std::vector<std::string>& values);
     void prop_cells(const std::string& name, const std::vector<u32>& cells);
+    void prop_bytes(const std::string& name, const std::vector<u8>& bytes);
     void prop_reg(const std::string& name, u64 address, u64 size);
 
     void align_structure();

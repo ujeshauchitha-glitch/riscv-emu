@@ -420,6 +420,7 @@ void test_device_tree_describes_every_hart() {
     c.virtio_net = true;
     c.virtio_rng = true;
     c.rtc = true;
+    c.rng_seed = {0xde, 0xad, 0xbe, 0xef, 1, 2, 3, 4};
     const std::vector<u8> blob = Fdt::build(c);
 
     auto has = [&](const char* needle) {
@@ -436,6 +437,16 @@ void test_device_tree_describes_every_hart() {
     CHECK(has("virtio_mmio@10002000"));
     CHECK(has("virtio_mmio@10003000"));
     CHECK(has("google,goldfish-rtc"));
+    CHECK(has("rng-seed"));
+    {
+        // ...and its bytes made it in.
+        const u8 seed[4] = {0xde, 0xad, 0xbe, 0xef};
+        bool found = false;
+        for (std::size_t i = 0; i + 4 <= blob.size(); ++i) {
+            if (std::memcmp(blob.data() + i, seed, 4) == 0) found = true;
+        }
+        CHECK(found);
+    }
 
     // And a tree built for one hart without the optional devices has none of them.
     FdtConfig plain;
@@ -446,6 +457,14 @@ void test_device_tree_describes_every_hart() {
         if (std::memcmp(small.data() + i, needle, std::strlen(needle)) == 0) found_net = true;
     }
     CHECK(!found_net);
+
+    // ...and no seed unless one was supplied.
+    bool found_seed = false;
+    const char* seed_name = "rng-seed";
+    for (std::size_t i = 0; i + std::strlen(seed_name) <= small.size(); ++i) {
+        if (std::memcmp(small.data() + i, seed_name, std::strlen(seed_name)) == 0) found_seed = true;
+    }
+    CHECK(!found_seed);
 }
 
 }  // namespace
