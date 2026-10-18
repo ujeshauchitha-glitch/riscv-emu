@@ -23,6 +23,7 @@ bool Bus::attach(std::unique_ptr<Device> dev) {
         if (a_lo < b_hi && b_lo < a_hi) return false;
     }
 
+    if (ram_ == nullptr) ram_ = dynamic_cast<Dram*>(dev.get());
     devices_.push_back(std::move(dev));
     return true;
 }
@@ -42,6 +43,11 @@ const Device* Bus::find(u64 addr) const {
 }
 
 Result<u64> Bus::load(u64 addr, unsigned size_bytes, AccessType type) const {
+    // RAM first, with the device scan as the fallback. The subtraction form of
+    // the range test cannot overflow for an address near the top of the space.
+    if (ram_ != nullptr && addr >= DRAM_BASE && addr - DRAM_BASE < ram_->size()) {
+        return ram_->Dram::load(addr - DRAM_BASE, size_bytes);
+    }
     const Device* dev = find(addr);
     if (dev == nullptr) {
         return Result<u64>::bad(access_fault_for(type), addr);
@@ -53,6 +59,9 @@ Result<u64> Bus::load(u64 addr, unsigned size_bytes, AccessType type) const {
 }
 
 Status Bus::store(u64 addr, unsigned size_bytes, u64 value) {
+    if (ram_ != nullptr && addr >= DRAM_BASE && addr - DRAM_BASE < ram_->size()) {
+        return ram_->Dram::store(addr - DRAM_BASE, size_bytes, value);
+    }
     Device* dev = find(addr);
     if (dev == nullptr) {
         return Status::bad(Exception::StoreAMOAccessFault, addr);

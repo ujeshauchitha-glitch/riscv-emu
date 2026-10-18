@@ -69,8 +69,9 @@ Result<u64> Mmu::translate(u64 vaddr, AccessType type, u32 priv, CsrFile& csrs) 
     // costs three extra memory reads for the walk, which is the difference
     // between a kernel booting in seconds and in minutes.
     const u64 key = tlb_key(vpn, asid);
-    if (auto it = tlb_.find(key); it != tlb_.end()) {
-        if (!permitted(it->second.perms, type, priv, csrs)) {
+    Entry& slot = tlb_[tlb_slot(vpn)];
+    if (slot.tag == key) {
+        if (!permitted(slot.perms, type, priv, csrs)) {
             return Result<u64>::bad(page_fault_for(type), vaddr);
         }
 
@@ -85,13 +86,13 @@ Result<u64> Mmu::translate(u64 vaddr, AccessType type, u32 priv, CsrFile& csrs) 
         //
         // Remembering the PTE's address in the entry is what makes this
         // possible without re-walking.
-        if (type == AccessType::Store && (it->second.perms & pte::D) == 0) {
-            it->second.perms |= pte::D;
-            bus_.store(it->second.pte_addr, 8, it->second.perms);
+        if (type == AccessType::Store && (slot.perms & pte::D) == 0) {
+            slot.perms |= pte::D;
+            bus_.store(slot.pte_addr, 8, slot.perms);
         }
 
         ++hits_;
-        return Result<u64>::good((it->second.ppn << PAGE_SHIFT) | offset);
+        return Result<u64>::good((slot.ppn << PAGE_SHIFT) | offset);
     }
     ++misses_;
 
@@ -170,6 +171,6 @@ Result<u64> Mmu::translate(u64 vaddr, AccessType type, u32 priv, CsrFile& csrs) 
     // Cache the *updated* permissions, not the ones read from memory: the
     // entry's D bit is what the hit path above tests, so caching the stale
     // value would make it write the PTE again on every store.
-    tlb_[key] = Entry{ppn, updated, pte_addr};
+    slot = Entry{key, ppn, updated, pte_addr};
     return Result<u64>::good((ppn << PAGE_SHIFT) | offset);
 }

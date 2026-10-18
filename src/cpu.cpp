@@ -34,9 +34,34 @@ inline u64 sext32(u32 value) {
 
 }  // namespace
 
-Cpu::Cpu(Bus& bus) : mmu(bus), bus_(bus) {
+Cpu::Cpu(Bus& bus) : mmu(bus), bus_(bus), dcache_(DCACHE_SLOTS) {
     regs.fill(0);
     pc = DRAM_BASE;
+}
+
+void Cpu::flush_decode_cache() {
+    for (DecodeEntry& e : dcache_) e.pc = ~0ull;
+}
+
+// Remember the instruction just fetched at `pc`, if it is safe to.
+void Cpu::cache_fill(const DecodedInst& inst) {
+    Dram* ram = bus_.ram();
+    if (ram == nullptr) return;
+
+    // A 32-bit instruction whose second halfword is on the next page was fetched
+    // with two translations, and the second page can be remapped independently.
+    if (inst.length == 4 && (pc & (PAGE_SIZE - 1)) == PAGE_SIZE - 2) return;
+
+    Result<u64> pa = mmu.translate(pc, AccessType::Instruction, priv, csrs);
+    if (!pa || pa.value < DRAM_BASE) return;
+    const u64 offset = pa.value - DRAM_BASE;
+    if (!ram->contains_range(offset, inst.length)) return;   // MMIO or off the end
+
+    ram->mark_code_page(offset);
+    DecodeEntry& e = dcache_[(pc >> 1) & (DCACHE_SLOTS - 1)];
+    e.pc   = pc;
+    e.priv = priv;
+    e.inst = inst;
 }
 
 u64 Cpu::read_reg(u32 index) const {
@@ -213,10 +238,28 @@ Status Cpu::step() {
         return Status::good();
     }
 
-    Result<DecodedInst> fetched = fetch_inst();
-    if (!fetched) return handle_trap_or_stop(fetched.trap);
-
-    const DecodedInst inst = fetched.value;
+    // Look for the instruction in the decode cache before paying for a fetch.
+    Dram* ram = bus_.ram();
+    DecodedInst inst;
+    bool        hit = false;
+    if (ram != nullptr) {
+        if (ram->code_epoch() != dcache_epoch_) {
+            // Something wrote to a page we had cached code from.
+            flush_decode_cache();
+            dcache_epoch_ = ram->code_epoch();
+        }
+        const DecodeEntry& e = dcache_[(pc >> 1) & (DCACHE_SLOTS - 1)];
+        if (e.pc == pc && e.priv == priv) {
+            inst = e.inst;
+            hit  = true;
+        }
+    }
+    if (!hit) {
+        Result<DecodedInst> fetched = fetch_inst();
+        if (!fetched) return handle_trap_or_stop(fetched.trap);
+        inst = fetched.value;
+        cache_fill(inst);
+    }
 
     // Default: fall through to the next instruction. Jumps and branches
     // overwrite this inside execute(). The step is the instruction's own
@@ -504,6 +547,9 @@ Status Cpu::execute(const DecodedInst& inst) {
         // FENCE.I (funct3 = 1) is the instruction-cache variant; we have no
         // instruction cache, so the same reasoning applies.
         case opcodes::MISC_MEM:
+            // FENCE.I is the guest saying "I have modified code, make the next
+            // fetch see it" - so cached decodes must go.
+            if (inst.funct3 == 1) flush_decode_cache();
             return Status::good();
 
         default:
@@ -1494,6 +1540,7 @@ Status Cpu::execute_sfence_vma(const DecodedInst& inst) {
     }
 
     mmu.flush();
+    flush_decode_cache();
     return Status::good();
 }
 
@@ -1592,7 +1639,7 @@ Status Cpu::csr_write(u32 addr, u64 value) {
 
     // Changing satp changes the entire address space, so every cached
     // translation is now potentially wrong.
-    if (addr == csr::SATP) mmu.flush();
+    if (addr == csr::SATP) { mmu.flush(); flush_decode_cache(); }
 
     return Status::good();
 }

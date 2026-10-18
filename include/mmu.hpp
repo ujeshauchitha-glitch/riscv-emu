@@ -1,6 +1,6 @@
 #pragma once
 
-#include <unordered_map>
+#include <array>
 
 #include "bus.hpp"
 #include "csr.hpp"
@@ -66,7 +66,9 @@ public:
 
     // Discard cached translations. Called on SFENCE.VMA and whenever satp
     // changes, because either can invalidate what the TLB remembers.
-    void flush() { tlb_.clear(); }
+    void flush() {
+        for (Entry& e : tlb_) e.tag = INVALID_TAG;
+    }
 
     // Statistics, useful when judging whether the TLB is doing anything.
     u64 tlb_hits() const   { return hits_; }
@@ -78,16 +80,31 @@ private:
     // A cached translation. Real hardware caches at page granularity and keys
     // by ASID so a context switch need not flush everything; the same shape is
     // used here.
+    //
+    // The TLB is direct-mapped: a translation can live in exactly one slot,
+    // chosen from the low bits of the virtual page number. The previous version
+    // was a std::unordered_map, which made every paged load, store and fetch
+    // pay for a hash and a pointer chase - and a kernel does one of those on
+    // nearly every instruction. An array index and a compare costs a couple of
+    // cycles. The price is that two hot pages whose numbers collide evict each
+    // other, which costs one table walk; with 1024 slots that is rare enough
+    // not to matter.
     struct Entry {
-        u64 ppn;       // physical page number of the mapped page
-        u64 perms;     // the leaf PTE's permission bits
-        u64 pte_addr;  // where that PTE lives, so D can be set on a later store
+        u64 tag      = INVALID_TAG;  // asid:vpn, or INVALID_TAG for an empty slot
+        u64 ppn      = 0;            // physical page number of the mapped page
+        u64 perms    = 0;            // the leaf PTE's permission bits
+        u64 pte_addr = 0;            // where that PTE lives, so D can be set on a later store
     };
-    std::unordered_map<u64, Entry> tlb_;
+    static constexpr std::size_t TLB_SLOTS = 1024;   // a power of two
+    // A real key is at most 16 (asid) + 27 (vpn) bits wide, so all-ones can
+    // never be one.
+    static constexpr u64 INVALID_TAG = ~0ull;
+    std::array<Entry, TLB_SLOTS> tlb_{};
     u64 hits_ = 0;
     u64 misses_ = 0;
 
     static u64 tlb_key(u64 vpn, u64 asid) { return (asid << 44) | vpn; }
+    static std::size_t tlb_slot(u64 vpn) { return static_cast<std::size_t>(vpn) & (TLB_SLOTS - 1); }
 
     // The page-fault cause matching this access type.
     static Exception page_fault_for(AccessType type);

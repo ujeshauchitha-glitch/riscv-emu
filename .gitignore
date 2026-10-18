@@ -11,3 +11,6 @@ third_party/
 
 # Build products of the Linux boot (scripts/boot-linux.sh).
 build/initramfs*
+
+# Windows build products.
+*.exe

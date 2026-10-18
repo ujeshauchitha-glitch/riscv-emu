@@ -25,7 +25,7 @@
 // The storage is a heap-allocated std::vector rather than a std::array member,
 // because 128 MiB is far too large to sit on the stack.
 // ---------------------------------------------------------------------------
-class Dram : public Device {
+class Dram final : public Device {
 public:
     explicit Dram(u64 size_bytes = DRAM_SIZE_DEFAULT);
 
@@ -41,11 +41,45 @@ public:
     bool load_image(u64 guest_addr, const std::vector<u8>& bytes);
 
     // Direct access for tests and for the ELF loader.
-    std::vector<u8>&       bytes() { return mem_; }
+    //
+    // The mutable overload counts as a write: whoever holds the reference can
+    // change code behind the decode cache's back, so it conservatively
+    // invalidates everything the CPUs have cached.
+    std::vector<u8>&       bytes() { invalidate_code(); return mem_; }
     const std::vector<u8>& bytes() const { return mem_; }
+
+    // --- decoded-instruction cache support -----------------------------------
+    //
+    // A CPU that caches decoded instructions must learn when the bytes behind
+    // them change. The guest is *supposed* to execute FENCE.I after modifying
+    // code, but the cache cannot rely on that: a device DMAing a page of
+    // executable code into RAM (virtio-blk reading a binary off disk) never
+    // executes FENCE.I, and a missed invalidation there runs stale instructions
+    // with no error anywhere.
+    //
+    // So the CPU tells DRAM which pages it has cached code from, and any store
+    // that lands on one of them - from the guest or from a device - bumps an
+    // epoch that every cache compares against before trusting an entry.
+    // Invalidation is all-or-nothing, which is fine: code pages are written
+    // rarely (a program being loaded, a kernel patching itself) compared with
+    // how often they are executed.
+    u64  code_epoch() const { return code_epoch_; }
+    void mark_code_page(u64 offset);
+    bool contains_range(u64 offset, unsigned size_bytes) const { return in_range(offset, size_bytes); }
 
 private:
     std::vector<u8> mem_;
+
+    u64                  code_epoch_ = 1;
+    std::vector<u8>      code_pages_;       // one flag per 4 KiB page
+    std::vector<u32>     marked_;           // the pages currently flagged
+    void invalidate_code();
+    void note_write(u64 offset, unsigned size_bytes) {
+        if (marked_.empty()) return;
+        if (code_pages_[offset >> 12] || code_pages_[(offset + size_bytes - 1) >> 12]) {
+            invalidate_code();
+        }
+    }
 
     // True if [offset, offset + size_bytes) lies entirely inside the array.
     bool in_range(u64 offset, unsigned size_bytes) const;

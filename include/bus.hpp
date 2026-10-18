@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "device.hpp"
+#include "dram.hpp"
 #include "result.hpp"
 #include "types.hpp"
 
@@ -44,8 +45,15 @@ public:
 
     const std::vector<std::unique_ptr<Device>>& devices() const { return devices_; }
 
+    // The guest RAM, if one is attached. Nearly every access a running guest
+    // makes lands here, so load() and store() test it first and call it without
+    // a virtual dispatch or a scan over the other devices; the CPU also uses it
+    // to register the pages it has cached decoded instructions from.
+    Dram* ram() const { return ram_; }
+
 private:
     std::vector<std::unique_ptr<Device>> devices_;
+    Dram* ram_ = nullptr;
 };
 
 // The access fault cause corresponding to an access type.

@@ -2,6 +2,7 @@
 
 #include <array>
 #include <iosfwd>
+#include <vector>
 
 #include "backends.hpp"
 #include "bus.hpp"
@@ -188,6 +189,12 @@ public:
     std::ostream* trace_stream = nullptr;  // defaults to std::cerr
     u64           instret      = 0;        // instructions retired
 
+    // Throw away every cached decoded instruction. Called when the mapping from
+    // virtual address to instruction bytes may have changed: SFENCE.VMA, a
+    // write to satp, and FENCE.I. (A write to the *bytes* is caught separately,
+    // by DRAM - see Dram::code_epoch.)
+    void flush_decode_cache();
+
     // Clear any outstanding LR/SC reservation. Called on trap entry, because a
     // context switch between an LR and its SC must make the SC fail - otherwise
     // two threads could both believe they won the same lock.
@@ -196,6 +203,32 @@ public:
 private:
     Bus& bus_;
     u64  next_pc_ = 0;
+
+    // The decoded-instruction cache.
+    //
+    // Fetching an instruction costs two translated 16-bit reads through the MMU
+    // and the bus, followed by a decode - and a kernel executes the same few
+    // thousand instructions over and over. Remembering the *decoded* result,
+    // keyed by PC, skips all of it on a hit.
+    //
+    // An entry is only trusted when four things still hold:
+    //   - the PC matches (it is direct-mapped, so a different PC may share a slot)
+    //   - the privilege matches, because the same virtual address can be
+    //     executable in one mode and a fault in another
+    //   - DRAM's code epoch is unchanged, i.e. nothing has written to a page we
+    //     cached code from
+    //   - nobody has flushed it (SFENCE.VMA, satp, FENCE.I) since it was filled
+    // Only instructions that lie wholly inside one page of DRAM are cached; one
+    // that straddles two pages needs two translations and takes the slow path.
+    struct DecodeEntry {
+        u64         pc   = ~0ull;
+        u32         priv = 0;
+        DecodedInst inst{};
+    };
+    static constexpr std::size_t DCACHE_SLOTS = 4096;   // a power of two
+    std::vector<DecodeEntry> dcache_;
+    u64                      dcache_epoch_ = 0;
+    void cache_fill(const DecodedInst& inst);
 
     // The LR/SC reservation set. Real hardware reserves a cache-line-sized
     // "granule"; a single-hart emulator only needs the address, since nothing

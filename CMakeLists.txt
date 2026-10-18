@@ -71,6 +71,13 @@ set(RISCV_EMU_TESTS
   test_backends
 )
 
+# A throughput benchmark, built but deliberately not registered as a test: it
+# measures speed, it does not check correctness, and a timing threshold in CI
+# would be flaky. Run ./bench_cpu by hand around a change to the execution loop.
+add_executable(bench_cpu tests/bench_cpu.cpp)
+target_link_libraries(bench_cpu PRIVATE riscv_core)
+target_include_directories(bench_cpu PRIVATE tests)
+
 foreach(test_name IN LISTS RISCV_EMU_TESTS)
   add_executable(${test_name} tests/${test_name}.cpp)
   target_link_libraries(${test_name} PRIVATE riscv_core)
