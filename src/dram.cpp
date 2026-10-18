@@ -60,6 +60,24 @@ Status Dram::store(u64 offset, unsigned size_bytes, u64 value) {
     return Status::good();
 }
 
+bool Dram::read_bytes(u64 guest_addr, void* dst, u64 len) const {
+    if (guest_addr < DRAM_BASE) return false;
+    const u64 offset = guest_addr - DRAM_BASE;
+    if (offset > mem_.size() || len > mem_.size() - offset) return false;
+    if (len != 0) std::memcpy(dst, mem_.data() + offset, static_cast<std::size_t>(len));
+    return true;
+}
+
+bool Dram::write_bytes(u64 guest_addr, const void* src, u64 len) {
+    if (guest_addr < DRAM_BASE) return false;
+    const u64 offset = guest_addr - DRAM_BASE;
+    if (offset > mem_.size() || len > mem_.size() - offset) return false;
+    if (len == 0) return true;
+    note_write(offset, len);
+    std::memcpy(mem_.data() + offset, src, static_cast<std::size_t>(len));
+    return true;
+}
+
 bool Dram::load_image(u64 guest_addr, const std::vector<u8>& blob) {
     if (guest_addr < DRAM_BASE) return false;
     const u64 offset = guest_addr - DRAM_BASE;

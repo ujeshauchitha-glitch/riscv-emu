@@ -43,6 +43,19 @@ public:
     virtual Result<u64> load(u64 offset, unsigned size_bytes) = 0;
     virtual Status      store(u64 offset, unsigned size_bytes, u64 value) = 0;
 
+    // Called by the machine once per scheduling round, for devices whose state
+    // changes without the guest touching them - a network card receiving a
+    // packet, an alarm clock going off. Most devices have nothing to do.
+    virtual void poll() {}
+
+    // True while the device is waiting on something outside the machine - a
+    // network reply, say - that real time must be allowed to deliver. While any
+    // device says so, an idle machine does not skip its clock forward to the next
+    // timer deadline: doing that would let the guest's own timeout expire in
+    // zero real seconds, before the answer it is waiting for could possibly
+    // arrive.
+    virtual bool io_pending() const { return false; }
+
     // Does this device claim `addr`?
     //
     // Note the subtraction rather than `addr < base() + size()`: computing the

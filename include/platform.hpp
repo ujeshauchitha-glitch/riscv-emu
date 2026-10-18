@@ -130,4 +130,8 @@ private:
     // Every hart is idle: skip the clock to the next deadline. Returns false if
     // there is no deadline to skip to.
     bool fast_forward_idle();
+
+    // Is some device waiting on the outside world? If so an idle machine lets
+    // real time pass instead of skipping ahead.
+    bool io_pending() const;
 };

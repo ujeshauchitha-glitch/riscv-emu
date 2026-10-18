@@ -1,103 +1,85 @@
 #pragma once
 
+#include <array>
+#include <fstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
-#include "device.hpp"
 #include "plic.hpp"
 #include "types.hpp"
+#include "virtio_mmio.hpp"
 
 class Bus;
 
 // ---------------------------------------------------------------------------
 // virtio-mmio block device.
 //
-// The disk. This is what lets xv6 have a filesystem rather than just a kernel.
+// The disk. This is what lets xv6 have a filesystem, and what holds a Debian
+// root filesystem.
 //
-// virtio is a standard for paravirtualised devices: rather than emulating real
-// hardware register-for-register, the guest and the device agree on a shared
-// memory protocol. That protocol is the **virtqueue**, and it is worth
-// understanding because it is the same shape used by virtio network cards,
-// consoles and everything else.
+// A block request chain is a header, any number of data buffers, and a status
+// byte:
 //
-// A virtqueue is three arrays in guest memory:
+//   [0]    the header  {type, reserved, sector}   device reads
+//   [1..n] the data    512-byte multiples          device reads (write) or writes (read)
+//   [n+1]  the status  one byte                    device writes: 0 means OK
 //
-//   descriptors  a pool of {address, length, flags, next} entries. A request is
-//                a *chain* of them linked by `next`.
-//   available    the driver's ring: "here are chain heads I want processed"
-//   used         the device's ring: "here are the ones I have finished"
+// xv6 sends exactly three descriptors. Linux sends one data buffer per
+// physically contiguous run of pages, so a large request has several - the
+// device must walk the whole chain rather than assume a fixed shape.
 //
-// The driver fills descriptors, appends the head index to the available ring,
-// bumps `avail.idx`, and writes QueueNotify. The device walks the chains,
-// does the work, appends to the used ring, bumps `used.idx`, and raises an
-// interrupt. Neither side ever blocks on the other.
+// **Where the bytes live.** Two modes:
 //
-// A block request chain is always three descriptors:
-//
-//   [0] the header  {type, reserved, sector}   device reads
-//   [1] the data    512 bytes per sector       device reads (write) or writes (read)
-//   [2] the status  one byte                   device writes: 0 means OK
-//
-// The device therefore has to reach into guest memory itself, which is why it
-// holds a Bus pointer - it is a bus master, not just a target.
+//   in memory  load_image() reads the whole file into a vector. Simple, and what
+//              the tests and xv6's small filesystem use.
+//   on disk    open_image() keeps the file open and reads and writes it in
+//              place, so a multi-gigabyte root filesystem costs no RAM and
+//              guest writes persist. With `snapshot` set, writes are held in a
+//              sector overlay and discarded on exit - the image on the host is
+//              never modified, which is what you want for experimenting.
 // ---------------------------------------------------------------------------
-class VirtioBlk : public Device {
+class VirtioBlk : public VirtioMmio {
 public:
     static constexpr u64 SECTOR_SIZE = 512;
-    static constexpr u32 QUEUE_MAX   = 8;
 
-    u64         base() const override { return VIRTIO_BASE; }
-    u64         size() const override { return 0x1000; }
+    explicit VirtioBlk(u64 base = VIRTIO_BASE);
+
     const char* name() const override { return "virtio-blk"; }
 
-    Result<u64> load(u64 offset, unsigned size_bytes) override;
-    Status      store(u64 offset, unsigned size_bytes, u64 value) override;
-
-    // The device reads and writes guest memory directly, so it needs the bus.
-    // Set after construction because the bus owns the device.
-    void attach(Bus* bus, Plic* plic, u32 irq) { bus_ = bus; plic_ = plic; irq_ = irq; }
-
-    // Back the disk with a file's contents. Returns false if unreadable.
+    // Back the disk with a file's contents, loaded into memory. Returns false if
+    // unreadable.
     bool load_image(const std::string& path);
 
-    // Capacity in 512-byte sectors, which is what the config space reports.
-    u64 sectors() const { return disk_.size() / SECTOR_SIZE; }
+    // Back the disk with a file kept open on the host. See the class comment.
+    bool open_image(const std::string& path, bool snapshot);
 
+    // Capacity in 512-byte sectors, which is what the config space reports.
+    u64 sectors() const { return size_bytes() / SECTOR_SIZE; }
+
+    // The in-memory disk. Only meaningful in memory mode.
     const std::vector<u8>& data() const { return disk_; }
     std::vector<u8>&       data() { return disk_; }
 
-private:
-    Bus*  bus_  = nullptr;
-    Plic* plic_ = nullptr;
-    u32   irq_  = 0;
+protected:
+    u64  device_features() const override;
+    u64  config_read(u64 offset, unsigned size_bytes) override;
+    void queue_notify(u32 queue) override;
 
+private:
     std::vector<u8> disk_;
 
-    // Device registers.
-    u32 status_          = 0;
-    // The feature space is 64 bits, read and written 32 at a time through a
-    // pair of select registers.
-    u64 driver_features_     = 0;
-    u32 device_features_sel_ = 0;
-    u32 driver_features_sel_ = 0;
-    u32 queue_sel_       = 0;
-    u32 queue_num_       = 0;
-    u32 queue_ready_     = 0;
-    u32 interrupt_status_ = 0;
+    bool          file_mode_ = false;
+    bool          snapshot_  = false;
+    std::fstream  file_;
+    u64           file_size_ = 0;
+    // Snapshot mode: sectors the guest has written, kept instead of the file's.
+    std::unordered_map<u64, std::array<u8, SECTOR_SIZE>> overlay_;
 
-    u64 desc_addr_  = 0;   // descriptor table
-    u64 avail_addr_ = 0;   // driver ring
-    u64 used_addr_  = 0;   // device ring
+    u64  size_bytes() const { return file_mode_ ? file_size_ : disk_.size(); }
+    bool disk_read(u64 offset, u8* dst, u64 len);
+    bool disk_write(u64 offset, const u8* src, u64 len);
+    bool disk_flush();
 
-    // The last avail.idx we processed. The difference between this and the
-    // driver's current idx is the work waiting for us.
-    u16 last_avail_ = 0;
-
-    void process_queue();
-    void process_chain(u16 head);
-    void raise_interrupt();
-
-    // Helpers for reaching into guest memory.
-    u64  read_guest(u64 addr, unsigned size) const;
-    void write_guest(u64 addr, unsigned size, u64 value);
+    void process_request(u32 queue, u16 head, const std::vector<Segment>& segs);
 };

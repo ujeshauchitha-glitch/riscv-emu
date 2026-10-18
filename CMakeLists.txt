@@ -25,6 +25,19 @@ add_compile_options(
   -Wnull-dereference
 )
 
+# On MinGW, link the C++ runtime statically.
+#
+# Otherwise the executables load libstdc++-6.dll and libgcc_s_seh-1.dll from
+# whatever directory happens to be first on PATH, which on a machine with more
+# than one MinGW/MSYS2 installed is routinely a *different version* from the
+# compiler that built them. The failure is a program that exits instantly with
+# 0xc0000139 (entry point not found) and prints nothing - or, under a test
+# runner, appears to hang on the loader's error dialog. A static runtime also
+# means riscv_emu.exe runs on a machine with no MinGW at all.
+if(MINGW)
+  add_link_options(-static)
+endif()
+
 # The emulator core, built as a library so that both the executable and the
 # tests can link against exactly the same code.
 add_library(riscv_core STATIC
@@ -43,10 +56,20 @@ add_library(riscv_core STATIC
   src/dram.cpp
   src/syscon.cpp
   src/uart.cpp
+  src/virtio_mmio.cpp
   src/virtio.cpp
+  src/virtio_net.cpp
+  src/rtc.cpp
+  src/hostnet.cpp
+  src/usernet.cpp
   src/trap.cpp
 )
 target_include_directories(riscv_core PUBLIC include)
+
+# Sockets live in a separate library on Windows.
+if(WIN32)
+  target_link_libraries(riscv_core PUBLIC ws2_32 iphlpapi)
+endif()
 
 add_executable(riscv_emu src/main.cpp)
 target_link_libraries(riscv_emu PRIVATE riscv_core)
@@ -71,6 +94,8 @@ set(RISCV_EMU_TESTS
   test_firmware
   test_backends
   test_smp
+  test_virtio
+  test_usernet
 )
 
 # A throughput benchmark, built but deliberately not registered as a test: it

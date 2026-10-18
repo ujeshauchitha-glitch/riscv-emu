@@ -1,3 +1,5 @@
+#include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -13,6 +15,9 @@
 #include "elf_loader.hpp"
 #include "plic.hpp"
 #include "platform.hpp"
+#include "rtc.hpp"
+#include "usernet.hpp"
+#include "virtio_net.hpp"
 #include "syscon.hpp"
 #include "types.hpp"
 #include "fdt.hpp"
@@ -39,7 +44,22 @@ void print_usage(const char* argv0) {
         << "  --quantum N          instructions each hart runs per scheduling round\n"
         << "                       (default 256); smaller is finer-grained, larger is faster\n"
         << "  --dump               dump registers when execution stops\n"
-        << "  --disk FILE          back the virtio block device with FILE\n"
+        << "  --disk FILE          back the virtio block device with FILE, read into memory\n"
+        << "                       (the guest's writes are discarded when the emulator exits)\n"
+        << "  --drive FILE         back the block device with FILE, kept on disk: no RAM cost\n"
+        << "                       for a big image, and the guest's writes persist in FILE\n"
+        << "  --drive-snapshot FILE  like --drive, but writes are held in memory and FILE is\n"
+        << "                       never modified\n"
+        << "\n"
+        << "  Devices:\n"
+        << "  --net user           a virtio network card on a built-in user-mode network:\n"
+        << "                       DHCP, DNS, TCP and UDP to the host's network, no setup\n"
+        << "  --net loopback       a network card whose transmitted frames come straight back\n"
+        << "  --net-dns IP         the DNS server the guest's lookups are forwarded to\n"
+        << "  --rng                a virtio entropy source (a Debian boot waits for one)\n"
+        << "  --rtc                a real-time clock, so the guest knows today's date\n"
+        << "  --rtc-fixed SECONDS  pin the clock to a Unix time instead of the host's\n"
+        << "\n"
         << "\n"
         << "  Booting Linux (see docs/09-booting-linux.md):\n"
         << "  --linux              start in supervisor mode with a generated device\n"
@@ -118,6 +138,14 @@ int main(int argc, char** argv) {
     std::string bootargs      = "console=ttyS0 earlycon=sbi";
     std::string initrd_path;
     std::string dtb_out_path;
+    std::string drive_path;
+    bool        drive_snapshot = false;
+    std::string net_mode;
+    std::string net_dns;
+    bool        want_rng = false;
+    bool        want_rtc = false;
+    bool        rtc_fixed = false;
+    u64         rtc_fixed_seconds = 0;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -136,6 +164,30 @@ int main(int argc, char** argv) {
         else if (arg == "--disk") {
             if (i + 1 >= argc) { std::cerr << "error: --disk requires a path\n"; return 2; }
             disk_path = argv[++i];
+        }
+        else if (arg == "--drive" || arg == "--drive-snapshot") {
+            if (i + 1 >= argc) { std::cerr << "error: " << arg << " requires a path\n"; return 2; }
+            drive_path = argv[++i];
+            drive_snapshot = (arg == "--drive-snapshot");
+        }
+        else if (arg == "--net") {
+            if (i + 1 >= argc) { std::cerr << "error: --net requires 'user' or 'loopback'\n"; return 2; }
+            net_mode = argv[++i];
+            if (net_mode != "user" && net_mode != "loopback") {
+                std::cerr << "error: --net takes 'user' or 'loopback', not '" << net_mode << "'\n";
+                return 2;
+            }
+        }
+        else if (arg == "--net-dns") {
+            if (i + 1 >= argc) { std::cerr << "error: --net-dns requires an IPv4 address\n"; return 2; }
+            net_dns = argv[++i];
+        }
+        else if (arg == "--rng") want_rng = true;
+        else if (arg == "--rtc") want_rtc = true;
+        else if (arg == "--rtc-fixed") {
+            if (!next_value(rtc_fixed_seconds)) return 2;
+            want_rtc = true;
+            rtc_fixed = true;
         }
         else if (arg == "--linux") linux_boot = true;
         else if (arg == "--bootargs") {
@@ -202,6 +254,10 @@ int main(int argc, char** argv) {
     // itself - and raises its interrupt through the PLIC.
     virtio->attach(&bus, plic, VIRTIO0_IRQ);
 
+    if (!disk_path.empty() && !drive_path.empty()) {
+        std::cerr << "error: --disk and --drive both name the block device; use one\n";
+        return 2;
+    }
     if (!disk_path.empty()) {
         if (!virtio->load_image(disk_path)) {
             std::cerr << "error: cannot read disk image '" << disk_path << "'\n";
@@ -209,6 +265,65 @@ int main(int argc, char** argv) {
         }
         std::cerr << "disk: " << disk_path << " (" << virtio->sectors()
                   << " sectors)\n";
+    }
+    if (!drive_path.empty()) {
+        if (!virtio->open_image(drive_path, drive_snapshot)) {
+            std::cerr << "error: cannot open drive image '" << drive_path << "'\n";
+            return 1;
+        }
+        std::cerr << "drive: " << drive_path << " (" << virtio->sectors() << " sectors, "
+                  << (drive_snapshot ? "snapshot: writes discarded" : "writes persist") << ")\n";
+    }
+
+    // --- optional devices ---------------------------------------------------------
+    //
+    // These live on the bus beside the block device, at consecutive virtio slots,
+    // and are described to the kernel in the device tree only when present - a
+    // node for hardware that is not there would make the kernel probe it.
+    std::unique_ptr<NetBackend> net_backend;
+    if (net_mode == "user") {
+        UserNet::Config net_config;
+        if (!net_dns.empty()) {
+            unsigned a, b, c, d;
+            if (std::sscanf(net_dns.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4 ||
+                a > 255 || b > 255 || c > 255 || d > 255) {
+                std::cerr << "error: --net-dns wants an IPv4 address like 1.1.1.1\n";
+                return 2;
+            }
+            net_config.dns_server = (a << 24) | (b << 16) | (c << 8) | d;
+        }
+        net_backend = std::make_unique<UserNet>(net_config);
+    } else if (net_mode == "loopback") {
+        net_backend = std::make_unique<LoopbackBackend>();
+    }
+    if (net_backend) {
+        // The MAC address is locally administered (bit 1 of the first byte set,
+        // bit 0 clear), which is how a made-up address announces that it is one.
+        const std::array<u8, 6> mac = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
+        auto net = std::make_unique<VirtioNet>(net_backend.get(), mac);
+        net->attach(&bus, plic, VIRTIO_NET_IRQ);
+        if (!bus.attach(std::move(net))) {
+            std::cerr << "error: cannot attach the network card\n";
+            return 1;
+        }
+        std::cerr << "net: virtio-net on a " << net_mode << " network\n";
+    }
+    if (want_rng) {
+        auto rng = std::make_unique<VirtioRng>();
+        rng->attach(&bus, plic, VIRTIO_RNG_IRQ);
+        if (!bus.attach(std::move(rng))) {
+            std::cerr << "error: cannot attach the entropy device\n";
+            return 1;
+        }
+    }
+    if (want_rtc) {
+        auto rtc = std::make_unique<Rtc>();
+        rtc->attach(plic, RTC_IRQ);
+        if (rtc_fixed) rtc->set_fixed_time(rtc_fixed_seconds * 1'000'000'000ull);
+        if (!bus.attach(std::move(rtc))) {
+            std::cerr << "error: cannot attach the clock\n";
+            return 1;
+        }
     }
 
     // --- load the image ---
@@ -315,6 +430,9 @@ int main(int argc, char** argv) {
         fdt_config.initrd_start = initrd_start;
         fdt_config.initrd_end   = initrd_end;
         fdt_config.harts        = static_cast<u32>(smp);
+        fdt_config.virtio_net   = static_cast<bool>(net_backend);
+        fdt_config.virtio_rng   = want_rng;
+        fdt_config.rtc          = want_rtc;
         const std::vector<u8> dtb = Fdt::build(fdt_config);
 
         if (!dtb_out_path.empty()) {

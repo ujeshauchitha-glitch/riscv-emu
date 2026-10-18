@@ -1,66 +1,39 @@
 #include "virtio.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 
 #include "bus.hpp"
 
 namespace {
-// MMIO register offsets, from the virtio specification.
-constexpr u64 MAGIC_VALUE      = 0x000;
-constexpr u64 VERSION          = 0x004;
-constexpr u64 DEVICE_ID        = 0x008;
-constexpr u64 VENDOR_ID        = 0x00c;
-constexpr u64 DEVICE_FEATURES     = 0x010;
-constexpr u64 DEVICE_FEATURES_SEL = 0x014;
-constexpr u64 DRIVER_FEATURES     = 0x020;
-constexpr u64 DRIVER_FEATURES_SEL = 0x024;
-constexpr u64 QUEUE_SEL        = 0x030;
-constexpr u64 QUEUE_NUM_MAX    = 0x034;
-constexpr u64 QUEUE_NUM        = 0x038;
-constexpr u64 QUEUE_READY      = 0x044;
-constexpr u64 QUEUE_NOTIFY     = 0x050;
-constexpr u64 INTERRUPT_STATUS = 0x060;
-constexpr u64 INTERRUPT_ACK    = 0x064;
-constexpr u64 STATUS           = 0x070;
-constexpr u64 QUEUE_DESC_LOW   = 0x080;
-constexpr u64 QUEUE_DESC_HIGH  = 0x084;
-constexpr u64 DRIVER_DESC_LOW  = 0x090;
-constexpr u64 DRIVER_DESC_HIGH = 0x094;
-constexpr u64 DEVICE_DESC_LOW  = 0x0a0;
-constexpr u64 DEVICE_DESC_HIGH = 0x0a4;
-constexpr u64 CONFIG           = 0x100;
-
-// "virt" in little-endian ASCII - the magic a driver checks first.
-constexpr u32 MAGIC = 0x74726976;
-constexpr u32 VENDOR = 0x554d4551;   // "QEMU"
 constexpr u32 BLOCK_DEVICE = 2;
 
-// Descriptor flags.
-constexpr u16 DESC_NEXT  = 1;   // chained to another descriptor
-constexpr u16 DESC_WRITE = 2;   // the device writes this buffer
-
 // Request types.
-constexpr u32 BLK_T_IN  = 0;    // read from disk
-constexpr u32 BLK_T_OUT = 1;    // write to disk
+constexpr u32 BLK_T_IN    = 0;    // read from disk
+constexpr u32 BLK_T_OUT   = 1;    // write to disk
+constexpr u32 BLK_T_FLUSH = 4;    // make earlier writes durable
+constexpr u32 BLK_T_GET_ID = 8;   // return a device identifier string
 
-constexpr u32 FEATURES_OK = 8;
+// Status values written to the last byte of the chain.
+constexpr u8 BLK_S_OK     = 0;
+constexpr u8 BLK_S_IOERR  = 1;
+constexpr u8 BLK_S_UNSUPP = 2;
 
-// VIRTIO_F_VERSION_1, feature bit 32: "this device speaks the modern protocol
-// rather than the legacy one". A version-2 MMIO device that does not offer it
-// is a contradiction, and Linux says so - virtio_finalize_features refuses with
-// "device uses modern interface but does not have VIRTIO_F_VERSION_1" and never
-// probes the device at all.
-//
-// The feature space is 64 bits wide but the registers are 32, so a driver reads
-// it in two halves: it writes 0 or 1 to DeviceFeaturesSel and then reads
-// DeviceFeatures. Bit 32 lives in the upper half, which is why ignoring the
-// select register makes it unreachable however many bits the device sets.
-//
-// xv6 never checks this, which is why the phase 7 boot worked without it.
-constexpr u64 F_VERSION_1 = 1ull << 32;
-constexpr u64 DEVICE_FEATURE_BITS = F_VERSION_1;
+// Feature bits (the low half of the feature space).
+constexpr u64 F_SEG_MAX  = 1ull << 2;    // the config space says how many segments a request may have
+constexpr u64 F_BLK_SIZE = 1ull << 6;    // the config space says the logical block size
+constexpr u64 F_FLUSH    = 1ull << 9;    // the device understands BLK_T_FLUSH
+
+// The most data segments one request may have. Linux sizes its scatter-gather
+// lists from this, and then needs the queue to have room for the header and
+// status descriptors as well.
+constexpr u32 SEG_MAX = 126;
+
+constexpr u64 HEADER_BYTES = 16;
 }  // namespace
+
+VirtioBlk::VirtioBlk(u64 base) : VirtioMmio(base, BLOCK_DEVICE, 1) {}
 
 bool VirtioBlk::load_image(const std::string& path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -70,208 +43,236 @@ bool VirtioBlk::load_image(const std::string& path) {
     f.seekg(0, std::ios::beg);
     disk_.resize(static_cast<std::size_t>(len));
     if (len > 0 && !f.read(reinterpret_cast<char*>(disk_.data()), len)) return false;
+    file_mode_ = false;
     return true;
 }
 
-u64 VirtioBlk::read_guest(u64 addr, unsigned size) const {
-    if (!bus_) return 0;
-    Result<u64> r = bus_->load(addr, size, AccessType::Load);
-    return r ? r.value : 0;
+bool VirtioBlk::open_image(const std::string& path, bool snapshot) {
+    // Snapshot mode never writes the file, so it can be opened read-only - which
+    // also lets an image on a read-only medium be used.
+    file_.open(path, snapshot ? (std::ios::in | std::ios::binary)
+                              : (std::ios::in | std::ios::out | std::ios::binary));
+    if (!file_) return false;
+    file_.seekg(0, std::ios::end);
+    const std::streamoff len = file_.tellg();
+    if (len < 0) return false;
+    file_size_ = static_cast<u64>(len);
+    file_mode_ = true;
+    snapshot_  = snapshot;
+    overlay_.clear();
+    disk_.clear();
+    return true;
 }
 
-void VirtioBlk::write_guest(u64 addr, unsigned size, u64 value) {
-    if (bus_) bus_->store(addr, size, value);
+u64 VirtioBlk::device_features() const {
+    return F_SEG_MAX | F_BLK_SIZE | F_FLUSH;
 }
 
-void VirtioBlk::raise_interrupt() {
-    // Bit 0 means "the device used a buffer" - the driver reads this to learn
-    // why it was interrupted, then acknowledges it.
-    interrupt_status_ |= 1;
-    if (plic_) plic_->set_pending(irq_, true);
+// struct virtio_blk_config:
+//    0  u64 capacity (in 512-byte sectors)
+//    8  u32 size_max
+//   12  u32 seg_max
+//   16  geometry: u16 cylinders, u8 heads, u8 sectors
+//   20  u32 blk_size
+u64 VirtioBlk::config_read(u64 offset, unsigned size_bytes) {
+    u8 config[24] = {};
+    const u64 cap = sectors();
+    std::memcpy(config + 0, &cap, 8);
+    const u32 seg_max = SEG_MAX;
+    std::memcpy(config + 12, &seg_max, 4);
+    const u32 blk_size = static_cast<u32>(SECTOR_SIZE);
+    std::memcpy(config + 20, &blk_size, 4);
+
+    // Any read that lies wholly inside the structure is served from it; anything
+    // past it reads as zero.
+    if (offset >= sizeof(config) || size_bytes == 0 || size_bytes > 8) return 0;
+    u64 value = 0;
+    for (unsigned i = 0; i < size_bytes && offset + i < sizeof(config); ++i) {
+        value |= static_cast<u64>(config[offset + i]) << (8 * i);
+    }
+    return value;
 }
 
-// Walk one descriptor chain and carry out the request it describes.
-void VirtioBlk::process_chain(u16 head) {
-    // Descriptor layout: {u64 addr; u32 len; u16 flags; u16 next;} = 16 bytes.
-    auto desc_addr = [&](u16 i) { return desc_addr_ + static_cast<u64>(i) * 16; };
+// --- the backing store ------------------------------------------------------------
 
-    // [0] the header. The driver only ever reads from here, so we do too.
-    const u16 d0 = head;
-    const u64 hdr = read_guest(desc_addr(d0) + 0, 8);
-    const u32 type   = static_cast<u32>(read_guest(hdr + 0, 4));
-    const u64 sector = read_guest(hdr + 8, 8);
+bool VirtioBlk::disk_read(u64 offset, u8* dst, u64 len) {
+    if (!file_mode_) {
+        std::memcpy(dst, disk_.data() + offset, static_cast<std::size_t>(len));
+        return true;
+    }
 
-    const u16 d1 = static_cast<u16>(read_guest(desc_addr(d0) + 14, 2));
+    file_.clear();
+    file_.seekg(static_cast<std::streamoff>(offset));
+    file_.read(reinterpret_cast<char*>(dst), static_cast<std::streamsize>(len));
+    if (!file_) { file_.clear(); return false; }
 
-    // [1] the data buffer.
-    const u64 buf     = read_guest(desc_addr(d1) + 0, 8);
-    const u32 buf_len = static_cast<u32>(read_guest(desc_addr(d1) + 8, 4));
-    const u16 d1_flags = static_cast<u16>(read_guest(desc_addr(d1) + 12, 2));
-    const u16 d2 = static_cast<u16>(read_guest(desc_addr(d1) + 14, 2));
+    // The guest's own writes shadow the file in snapshot mode. Walk the sectors
+    // the request touches and patch in any it has overwritten.
+    if (snapshot_ && !overlay_.empty()) {
+        const u64 first = offset / SECTOR_SIZE;
+        const u64 last  = (offset + len - 1) / SECTOR_SIZE;
+        for (u64 s = first; s <= last; ++s) {
+            auto it = overlay_.find(s);
+            if (it == overlay_.end()) continue;
+            const u64 sector_start = s * SECTOR_SIZE;
+            const u64 from = std::max(sector_start, offset);
+            const u64 to   = std::min(sector_start + SECTOR_SIZE, offset + len);
+            std::memcpy(dst + (from - offset), it->second.data() + (from - sector_start),
+                        static_cast<std::size_t>(to - from));
+        }
+    }
+    return true;
+}
 
-    u8 status = 0;   // 0 = OK
-    const u64 offset = sector * SECTOR_SIZE;
+bool VirtioBlk::disk_write(u64 offset, const u8* src, u64 len) {
+    if (!file_mode_) {
+        std::memcpy(disk_.data() + offset, src, static_cast<std::size_t>(len));
+        return true;
+    }
 
-    // Bounds-check by subtraction, not addition.
-    //
-    // The obvious `offset + buf_len > disk_.size()` overflows: a guest that
-    // asks for sector 0x7fff_ffff_ffc0_00 with a 2 GiB buffer makes the sum
-    // wrap to zero, the check passes, and the loops below index two gigabytes
-    // *before* the start of the vector. That is an out-of-bounds host read for
-    // BLK_T_IN and an out-of-bounds host *write* for BLK_T_OUT - the device is
-    // a bus master reading guest-controlled descriptors, so every field here is
-    // hostile input.
-    //
-    // Comparing against `disk_.size() - buf_len` cannot wrap, because the
-    // buf_len check runs first.
-    if (buf_len > disk_.size() || offset > disk_.size() - buf_len) {
-        status = 1;   // IOERR: the request runs off the end of the disk
-    } else if (type == BLK_T_IN) {
-        // Read: disk -> guest memory. The descriptor must be device-writable;
-        // a driver that got this backwards would be asking us to write into a
-        // read-only buffer.
-        if ((d1_flags & DESC_WRITE) == 0) {
-            status = 1;
-        } else {
-            for (u32 i = 0; i < buf_len; ++i) {
-                write_guest(buf + i, 1, disk_[offset + i]);
+    if (snapshot_) {
+        // Copy-on-write at sector granularity: pull in the sector's current
+        // contents the first time it is touched, so a partial-sector write
+        // keeps the bytes around it.
+        u64 pos = 0;
+        while (pos < len) {
+            const u64 s      = (offset + pos) / SECTOR_SIZE;
+            const u64 within = (offset + pos) % SECTOR_SIZE;
+            const u64 n      = std::min<u64>(SECTOR_SIZE - within, len - pos);
+            auto it = overlay_.find(s);
+            if (it == overlay_.end()) {
+                std::array<u8, SECTOR_SIZE> sector{};
+                if (n != SECTOR_SIZE && !disk_read(s * SECTOR_SIZE, sector.data(), SECTOR_SIZE)) {
+                    return false;
+                }
+                it = overlay_.emplace(s, sector).first;
+            }
+            std::memcpy(it->second.data() + within, src + pos, static_cast<std::size_t>(n));
+            pos += n;
+        }
+        return true;
+    }
+
+    file_.clear();
+    file_.seekp(static_cast<std::streamoff>(offset));
+    file_.write(reinterpret_cast<const char*>(src), static_cast<std::streamsize>(len));
+    if (!file_) { file_.clear(); return false; }
+    return true;
+}
+
+bool VirtioBlk::disk_flush() {
+    if (!file_mode_ || snapshot_) return true;
+    file_.flush();
+    return static_cast<bool>(file_);
+}
+
+// --- requests -----------------------------------------------------------------------
+
+void VirtioBlk::queue_notify(u32 queue) {
+    u16 head;
+    std::vector<Segment> segs;
+    bool any = false;
+    while (pop_chain(queue, head, segs)) {
+        process_request(queue, head, segs);
+        any = true;
+    }
+    if (any) signal_used(queue);
+}
+
+void VirtioBlk::process_request(u32 queue, u16 head, const std::vector<Segment>& segs) {
+    // A well-formed chain has a header at the front and a status byte at the
+    // back. Without both there is nowhere to report anything, so complete it
+    // empty rather than guess.
+    if (segs.size() < 2 || segs.front().device_writes || segs.front().len < HEADER_BYTES ||
+        !segs.back().device_writes || segs.back().len < 1) {
+        push_used(queue, head, 0);
+        return;
+    }
+
+    u8 header[HEADER_BYTES];
+    if (!read_guest_bytes(segs.front().addr, header, HEADER_BYTES)) {
+        push_used(queue, head, 0);
+        return;
+    }
+    u32 type;
+    u64 sector;
+    std::memcpy(&type, header + 0, 4);
+    std::memcpy(&sector, header + 8, 8);
+
+    const std::vector<Segment> data(segs.begin() + 1, segs.end() - 1);
+    u8  status  = BLK_S_OK;
+    u32 written = 0;     // bytes written into device-writable buffers (data only)
+
+    if (type == BLK_T_IN || type == BLK_T_OUT) {
+        // Total bytes the request covers, and whether every data buffer points
+        // the right way: the device writes them for a read, the driver filled
+        // them for a write. A driver that got this backwards would be asking us
+        // to write into a read-only buffer.
+        const bool is_read = (type == BLK_T_IN);
+        u64 total = 0;
+        bool direction_ok = true;
+        for (const Segment& s : data) {
+            total += s.len;
+            if (s.device_writes != is_read) direction_ok = false;
+        }
+
+        // Bounds-check by comparison before arithmetic.
+        //
+        // The obvious `sector * 512 + total > size` overflows: a guest that asks
+        // for sector 0x7fff_ffff_ffc0_00 makes the product wrap, the check
+        // passes, and the loops below index far outside the disk. That is an
+        // out-of-bounds host read for BLK_T_IN and an out-of-bounds host *write*
+        // for BLK_T_OUT - the device is a bus master reading guest-controlled
+        // descriptors, so every field here is hostile input. Testing the sector
+        // number against the capacity first means the multiply cannot overflow,
+        // and `total` is compared by subtraction.
+        const u64 size = size_bytes();
+        if (!direction_ok || sector > size / SECTOR_SIZE || total > size ||
+            sector * SECTOR_SIZE > size - total) {
+            status = BLK_S_IOERR;
+        } else if (total != 0) {
+            // Move the data one buffer at a time, bounded by a modest staging
+            // buffer so a 64 MiB request does not allocate 64 MiB.
+            std::vector<u8> chunk(64 * 1024);
+            u64 disk_offset = sector * SECTOR_SIZE;
+            for (const Segment& s : data) {
+                u64 done = 0;
+                while (done < s.len && status == BLK_S_OK) {
+                    const u64 n = std::min<u64>(chunk.size(), s.len - done);
+                    if (is_read) {
+                        if (!disk_read(disk_offset, chunk.data(), n) ||
+                            !write_guest_bytes(s.addr + done, chunk.data(), n)) {
+                            status = BLK_S_IOERR;
+                        }
+                    } else {
+                        if (!read_guest_bytes(s.addr + done, chunk.data(), n) ||
+                            !disk_write(disk_offset, chunk.data(), n)) {
+                            status = BLK_S_IOERR;
+                        }
+                    }
+                    done += n;
+                    disk_offset += n;
+                }
+                if (status != BLK_S_OK) break;
+                if (is_read) written += s.len;
             }
         }
-    } else if (type == BLK_T_OUT) {
-        // Write: guest memory -> disk.
-        for (u32 i = 0; i < buf_len; ++i) {
-            disk_[offset + i] = static_cast<u8>(read_guest(buf + i, 1));
+    } else if (type == BLK_T_FLUSH) {
+        if (!disk_flush()) status = BLK_S_IOERR;
+    } else if (type == BLK_T_GET_ID) {
+        static const char id[20] = "riscv-emu-virtio";
+        if (!data.empty() && data.front().device_writes) {
+            const u32 n = std::min<u32>(data.front().len, sizeof(id));
+            if (write_guest_bytes(data.front().addr, id, n)) written = n;
+            else status = BLK_S_IOERR;
+        } else {
+            status = BLK_S_IOERR;
         }
     } else {
-        status = 2;   // unsupported request type
+        status = BLK_S_UNSUPP;
     }
 
-    // [2] the status byte, which the device always writes.
-    const u64 status_buf = read_guest(desc_addr(d2) + 0, 8);
-    write_guest(status_buf, 1, status);
-
-    // Publish completion in the used ring:
-    //   {u16 flags; u16 idx; struct {u32 id; u32 len;} ring[];}
-    const u16 used_idx = static_cast<u16>(read_guest(used_addr_ + 2, 2));
-    const u64 slot = used_addr_ + 4 + static_cast<u64>(used_idx % queue_num_) * 8;
-    write_guest(slot + 0, 4, head);          // which chain finished
-    write_guest(slot + 4, 4, buf_len);       // how many bytes were transferred
-
-    // The index is bumped only after the entry is fully written, so the driver
-    // can never observe a half-published completion.
-    write_guest(used_addr_ + 2, 2, static_cast<u16>(used_idx + 1));
-}
-
-void VirtioBlk::process_queue() {
-    if (!bus_ || queue_num_ == 0) return;
-
-    // The available ring: {u16 flags; u16 idx; u16 ring[];}
-    const u16 avail_idx = static_cast<u16>(read_guest(avail_addr_ + 2, 2));
-
-    // Everything between what we last handled and where the driver has got to.
-    while (last_avail_ != avail_idx) {
-        const u64 slot = avail_addr_ + 4 + static_cast<u64>(last_avail_ % queue_num_) * 2;
-        const u16 head = static_cast<u16>(read_guest(slot, 2));
-        process_chain(head);
-        ++last_avail_;
-    }
-
-    raise_interrupt();
-}
-
-Result<u64> VirtioBlk::load(u64 offset, unsigned size_bytes) {
-    // The config space reports capacity as a 64-bit sector count, which drivers
-    // may read in halves.
-    if (offset >= CONFIG) {
-        const u64 cap = sectors();
-        const u64 within = offset - CONFIG;
-        if (within == 0 && size_bytes == 8) return Result<u64>::good(cap);
-        if (within == 0 && size_bytes == 4) return Result<u64>::good(cap & 0xffff'ffff);
-        if (within == 4 && size_bytes == 4) return Result<u64>::good(cap >> 32);
-        return Result<u64>::good(0);
-    }
-
-    if (size_bytes != 4) {
-        return Result<u64>::bad(Exception::LoadAccessFault, VIRTIO_BASE + offset);
-    }
-
-    switch (offset) {
-        case MAGIC_VALUE:      return Result<u64>::good(MAGIC);
-        case VERSION:          return Result<u64>::good(2);   // modern MMIO
-        case DEVICE_ID:        return Result<u64>::good(BLOCK_DEVICE);
-        case VENDOR_ID:        return Result<u64>::good(VENDOR);
-
-        // The half of the feature space the driver most recently selected.
-        // Everything optional is absent - a bare block device needs none of
-        // it - but VIRTIO_F_VERSION_1 is not optional for a version-2 device.
-        case DEVICE_FEATURES:
-            return Result<u64>::good(
-                static_cast<u32>(DEVICE_FEATURE_BITS >> (device_features_sel_ * 32)));
-
-        case QUEUE_NUM_MAX:    return Result<u64>::good(QUEUE_MAX);
-        case QUEUE_READY:      return Result<u64>::good(queue_ready_);
-        case INTERRUPT_STATUS: return Result<u64>::good(interrupt_status_);
-        case STATUS:           return Result<u64>::good(status_);
-        default:               return Result<u64>::good(0);
-    }
-}
-
-Status VirtioBlk::store(u64 offset, unsigned size_bytes, u64 value) {
-    if (size_bytes != 4) {
-        return Status::bad(Exception::StoreAMOAccessFault, VIRTIO_BASE + offset);
-    }
-    const u32 v = static_cast<u32>(value);
-
-    switch (offset) {
-        case DEVICE_FEATURES_SEL: device_features_sel_ = (v != 0) ? 1 : 0; break;
-        case DRIVER_FEATURES_SEL: driver_features_sel_ = (v != 0) ? 1 : 0; break;
-
-        case DRIVER_FEATURES:
-            // The driver acknowledges features the same way it read them, one
-            // 32-bit half at a time.
-            driver_features_ &= ~(0xffffffffull << (driver_features_sel_ * 32));
-            driver_features_ |= (v & 0xffffffffull) << (driver_features_sel_ * 32);
-            break;
-        case QUEUE_SEL:       queue_sel_ = v; break;
-        case QUEUE_NUM:       queue_num_ = v; break;
-        case QUEUE_READY:     queue_ready_ = v; break;
-
-        case QUEUE_DESC_LOW:   desc_addr_  = (desc_addr_  & ~0xffff'ffffull) | v; break;
-        case QUEUE_DESC_HIGH:  desc_addr_  = (desc_addr_  & 0xffff'ffffull) | (u64(v) << 32); break;
-        case DRIVER_DESC_LOW:  avail_addr_ = (avail_addr_ & ~0xffff'ffffull) | v; break;
-        case DRIVER_DESC_HIGH: avail_addr_ = (avail_addr_ & 0xffff'ffffull) | (u64(v) << 32); break;
-        case DEVICE_DESC_LOW:  used_addr_  = (used_addr_  & ~0xffff'ffffull) | v; break;
-        case DEVICE_DESC_HIGH: used_addr_  = (used_addr_  & 0xffff'ffffull) | (u64(v) << 32); break;
-
-        case QUEUE_NOTIFY:
-            // The driver has queued work. This is the only register whose write
-            // makes the device *do* something.
-            process_queue();
-            break;
-
-        case INTERRUPT_ACK:
-            interrupt_status_ &= ~v;
-            // Once acknowledged the line drops, so the PLIC stops reporting it.
-            if (interrupt_status_ == 0 && plic_) plic_->set_pending(irq_, false);
-            break;
-
-        case STATUS:
-            status_ = v;
-            // A driver writing 0 is resetting the device.
-            if (v == 0) {
-                queue_num_ = 0;
-                queue_ready_ = 0;
-                last_avail_ = 0;
-                interrupt_status_ = 0;
-                desc_addr_ = avail_addr_ = used_addr_ = 0;
-            } else if (v & FEATURES_OK) {
-                // Acknowledge the feature negotiation. The driver reads STATUS
-                // back and panics if FEATURES_OK did not stick.
-                status_ |= FEATURES_OK;
-            }
-            break;
-
-        default: break;
-    }
-    return Status::good();
+    // [last] the status byte, which the device always writes.
+    write_guest_bytes(segs.back().addr, &status, 1);
+    push_used(queue, head, written + 1);
 }

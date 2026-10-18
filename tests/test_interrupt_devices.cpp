@@ -384,7 +384,10 @@ void test_virtio_offers_version_1() {
     rig.blk->store(0x014, 4, 0);                 // DeviceFeaturesSel = 0
     auto low = rig.blk->load(0x010, 4);
     CHECK(low);
-    CHECK_EQ_U(low.value, 0);                    // no optional features
+    // The optional features the block device offers: SEG_MAX (bit 2), BLK_SIZE
+    // (bit 6) and FLUSH (bit 9). Nothing else - in particular nothing that would
+    // make the driver expect a layout this device does not implement.
+    CHECK_EQ_U(low.value, (1u << 2) | (1u << 6) | (1u << 9));
 
     rig.blk->store(0x014, 4, 1);                 // DeviceFeaturesSel = 1
     auto high = rig.blk->load(0x010, 4);

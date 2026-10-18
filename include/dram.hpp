@@ -67,6 +67,17 @@ public:
     void mark_code_page(u64 offset);
     bool contains_range(u64 offset, unsigned size_bytes) const { return in_range(offset, size_bytes); }
 
+    // Bulk access for devices that read and write guest memory themselves
+    // (DMA). `guest_addr` is an absolute physical address; both return false,
+    // and touch nothing, if any part of the range lies outside DRAM.
+    //
+    // This is the fast path for virtio: copying a 4 KiB disk block through the
+    // bus a byte at a time is thousands of dispatches, and it would not notice
+    // that it was overwriting a page the CPU had cached decoded code from.
+    // write_bytes() does the invalidation that Dram::store() does.
+    bool read_bytes(u64 guest_addr, void* dst, u64 len) const;
+    bool write_bytes(u64 guest_addr, const void* src, u64 len);
+
 private:
     std::vector<u8> mem_;
 
@@ -74,10 +85,12 @@ private:
     std::vector<u8>      code_pages_;       // one flag per 4 KiB page
     std::vector<u32>     marked_;           // the pages currently flagged
     void invalidate_code();
-    void note_write(u64 offset, unsigned size_bytes) {
-        if (marked_.empty()) return;
-        if (code_pages_[offset >> 12] || code_pages_[(offset + size_bytes - 1) >> 12]) {
-            invalidate_code();
+    void note_write(u64 offset, u64 size_bytes) {
+        if (marked_.empty() || size_bytes == 0) return;
+        const u64 first = offset >> 12;
+        const u64 last  = (offset + size_bytes - 1) >> 12;
+        for (u64 page = first; page <= last; ++page) {
+            if (code_pages_[page]) { invalidate_code(); return; }
         }
     }
 

@@ -101,6 +101,9 @@ void Platform::poll_devices() {
         uart_->poll_host_input();
     }
 
+    // Devices with their own clocks or external inputs (a network card, say).
+    for (const auto& dev : bus_.devices()) dev->poll();
+
     if (plic_ != nullptr && uart_ != nullptr) {
         plic_->set_pending(uart_irq_, uart_->interrupting());
     }
@@ -152,6 +155,13 @@ bool Platform::check_stop() {
         b.htif_tohost_value = htif_tohost_value;
     }
     return halted_;
+}
+
+bool Platform::io_pending() const {
+    for (const auto& dev : bus_.devices()) {
+        if (dev->io_pending()) return true;
+    }
+    return false;
 }
 
 bool Platform::fast_forward_idle() {
@@ -232,7 +242,20 @@ Status Platform::run(u64 max_steps, u64* steps_out) {
             // otherwise the only thing that can still wake the machine is the
             // outside world typing at the console.
             if (++idle_rounds > max_steps) break;
-            if (!fast_forward_idle()) {
+            // An idle round executes nothing, so it would never accumulate toward
+            // the next host-keyboard poll on its own.
+            since_host_poll_ += 64;
+
+            if (io_pending()) {
+                // Something outside the machine is still expected to answer. Let
+                // real time pass - a couple of hundred microseconds a round, the
+                // guest clock keeping pace at its nominal 10 MHz - rather than
+                // skipping to the next deadline and timing the request out
+                // before the reply could possibly arrive.
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+                if (clint_ != nullptr) clint_->tick(2000);
+                consecutive_idle = 0;
+            } else if (!fast_forward_idle()) {
                 if (uart_ != nullptr && uart_->host_input_active()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     since_host_poll_ = 4096;
