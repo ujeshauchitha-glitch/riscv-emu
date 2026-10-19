@@ -329,6 +329,15 @@ impl<'p> GdbStub<'p> {
         self.st.borrow_mut().interrupt_requested = Some(f);
     }
 
+    /// The machine being debugged.
+    pub fn platform(&self) -> &Platform {
+        self.platform
+    }
+
+    pub fn platform_mut(&mut self) -> &mut Platform {
+        self.platform
+    }
+
     pub fn detached(&self) -> bool {
         self.st.borrow().detached
     }

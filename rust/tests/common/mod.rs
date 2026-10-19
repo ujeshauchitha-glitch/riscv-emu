@@ -7,6 +7,8 @@
 
 #![allow(dead_code)]
 
+use std::cell::RefCell;
+use std::io::Write;
 use std::rc::Rc;
 
 use riscv_emu::bus::Bus;
@@ -162,5 +164,28 @@ impl Rng {
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         z ^ (z >> 31)
+    }
+}
+
+/// A clonable in-memory writer, so a test can read back what a device printed.
+#[derive(Clone, Default)]
+pub struct SharedBuf(pub Rc<RefCell<Vec<u8>>>);
+
+impl SharedBuf {
+    pub fn new() -> SharedBuf {
+        SharedBuf::default()
+    }
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.borrow()).into_owned()
+    }
+}
+
+impl Write for SharedBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
