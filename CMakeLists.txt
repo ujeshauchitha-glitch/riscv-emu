@@ -158,9 +158,9 @@ endforeach()
 # riscv64-unknown-elf-, Fedora ships riscv64-elf-, and a Linux-target
 # cross-compiler (riscv64-linux-gnu-) assembles bare-metal code perfectly well
 # too. All three are accepted.
-find_program(RISCV_AS      NAMES riscv64-unknown-elf-as riscv64-elf-as riscv64-linux-gnu-as)
-find_program(RISCV_LD      NAMES riscv64-unknown-elf-ld riscv64-elf-ld riscv64-linux-gnu-ld)
-find_program(RISCV_OBJCOPY NAMES riscv64-unknown-elf-objcopy riscv64-elf-objcopy riscv64-linux-gnu-objcopy)
+find_program(RISCV_AS      NAMES riscv64-unknown-elf-as riscv64-elf-as riscv-none-elf-as riscv64-linux-gnu-as)
+find_program(RISCV_LD      NAMES riscv64-unknown-elf-ld riscv64-elf-ld riscv-none-elf-ld riscv64-linux-gnu-ld)
+find_program(RISCV_OBJCOPY NAMES riscv64-unknown-elf-objcopy riscv64-elf-objcopy riscv-none-elf-objcopy riscv64-linux-gnu-objcopy)
 
 if(RISCV_AS AND RISCV_LD AND RISCV_OBJCOPY)
   set(SELFTEST_LD ${CMAKE_CURRENT_SOURCE_DIR}/examples/link.ld)
@@ -193,7 +193,7 @@ if(RISCV_AS AND RISCV_LD AND RISCV_OBJCOPY)
     add_custom_command(
       OUTPUT ${st_bin}
       COMMAND ${RISCV_AS} -march=${st_arch} -mabi=lp64 -o ${st_name}.o ${st_src}
-      COMMAND ${RISCV_LD} --no-warn-rwx-segments -T ${SELFTEST_LD} -o ${st_name}.elf ${st_name}.o
+      COMMAND ${RISCV_LD} -m elf64lriscv --no-warn-rwx-segments -T ${SELFTEST_LD} -o ${st_name}.elf ${st_name}.o
       COMMAND ${RISCV_OBJCOPY} -O binary ${st_name}.elf ${st_bin}
       DEPENDS ${st_src} ${SELFTEST_LD}
       WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}

@@ -51,6 +51,10 @@ CsrFile::CsrFile() {
     // mstatus starts with interrupts disabled and MPP = M. A hart comes out of
     // reset in machine mode with nothing set up yet.
     raw_[csr::MSTATUS] = static_cast<u64>(PRIV_MACHINE) << csr::MSTATUS_MPP_SHIFT;
+
+    // This is an RV64-only machine, so user and supervisor mode are both 64-bit.
+    // The fields are outside MSTATUS_MASK, which is what makes them read-only.
+    raw_[csr::MSTATUS] |= (csr::MSTATUS_XL_RV64 << 32) | (csr::MSTATUS_XL_RV64 << 34);
 }
 
 bool CsrFile::exists(u32 addr) const {
@@ -210,8 +214,8 @@ void CsrFile::write(u32 addr, u64 value) {
         // Writing a supervisor view writes through to the machine register,
         // touching only the bits that view exposes.
         case csr::SSTATUS:
-            raw_[csr::MSTATUS] = (raw_[csr::MSTATUS] & ~csr::SSTATUS_MASK) |
-                                 (value & csr::SSTATUS_MASK);
+            raw_[csr::MSTATUS] = (raw_[csr::MSTATUS] & ~csr::SSTATUS_WRITE_MASK) |
+                                 (value & csr::SSTATUS_WRITE_MASK);
             return;
         case csr::SIE:
             raw_[csr::MIE] = (raw_[csr::MIE] & ~csr::SIE_SIP_MASK) |

@@ -67,10 +67,11 @@ else
 fi
 
 # The toolchain prefix differs by distribution: Debian and Ubuntu ship
-# riscv64-unknown-elf-, Fedora ships riscv64-elf-, and a Linux-target
+# riscv64-unknown-elf-, Fedora ships riscv64-elf-, the xPack and Arm-style
+# builds used on Windows and macOS are riscv-none-elf-, and a Linux-target
 # cross-compiler builds these freestanding tests fine as well.
 CROSS=""
-for p in riscv64-unknown-elf- riscv64-elf- riscv64-linux-gnu-; do
+for p in riscv64-unknown-elf- riscv64-elf- riscv-none-elf- riscv64-linux-gnu-; do
   command -v "${p}gcc" > /dev/null && { CROSS="$p"; break; }
 done
 if [ -z "$CROSS" ]; then

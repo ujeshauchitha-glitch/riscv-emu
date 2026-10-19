@@ -116,6 +116,11 @@ _start:                                                                        \
         la      t0, __trap_is_failure;                                         \
 92:     csrw    stvec, t0;                                                     \
         li      TESTNUM, 0;                                                    \
+        /* Start from a cleared mstatus, as the official environment does.     \
+           Tests that want to return into supervisor mode set MPP with a       \
+           single `csrs` of one bit, which only works if MPP began at zero -   \
+           this machine's reset value has MPP = machine mode. */               \
+        csrwi   mstatus, 0;                                                    \
         init;                                                                  \
         j       __test_start;                                                  \
                                                                                \
@@ -215,5 +220,31 @@ fromhost: .dword 0;
 #define MCONTROL_EXECUTE (1 << 2)
 #define MCONTROL_STORE   (1 << 1)
 #define MCONTROL_LOAD    (1 << 0)
+
+// Virtual-memory constants, for the tests that build their own page tables
+// (rv64si/dirty, rv64si/icache-alias) and for rv64si/csr, which probes the
+// UXL field. Values are the architectural ones from the privileged specification.
+
+#define DRAM_BASE 0x80000000
+
+#define PTE_V 0x001
+#define PTE_R 0x002
+#define PTE_W 0x004
+#define PTE_X 0x008
+#define PTE_U 0x010
+#define PTE_G 0x020
+#define PTE_A 0x040
+#define PTE_D 0x080
+#define PTE_PPN_SHIFT 10
+
+#define RISCV_PGSHIFT 12
+#define RISCV_PGSIZE  (1 << RISCV_PGSHIFT)
+
+// satp on RV64: MODE in bits 63:60. The tests multiply the lowest set bit of the
+// mask by the mode number, which is the idiom for "shift MODE into place".
+#define SATP_MODE      0xF000000000000000
+#define SATP_MODE_SV39 8
+
+#define SSTATUS_UXL    0x0000000300000000
 
 #endif

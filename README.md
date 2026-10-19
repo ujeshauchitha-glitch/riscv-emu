@@ -63,14 +63,15 @@ the emulator can build passes:
 
 ```
 rv64ui 54/54   rv64um 13/13   rv64ua 19/19   rv64mi 11/11
-rv64si  4/4    rv64uc  1/1    rv64uf 11/11   rv64ud 12/12
-125/125 passed
+rv64si  7/7    rv64uc  1/1    rv64uf 11/11   rv64ud 12/12
+128/128 passed
 ```
 
-*(Measured at the end of phase 9. Phases 10–14 changed the main loop, the fetch path and the
-device layer, and the suite needs a RISC-V toolchain: it has not been re-run on the machine
-that phases 10–14 were developed on, though the four bare-metal self-tests it can run give the
-same results as before. CI runs the full suite on every push.)*
+*(Re-run in full after phases 10–14, which rewrote the main loop, the fetch path and the device
+layer. It went from 125 to 128 because three `rv64si` tests that used to be skipped — `csr`,
+`dirty` and `icache-alias` — now build, and they found a real gap: `sstatus.UXL` read as 0
+instead of 2. `icache-alias` also exercises the decoded-instruction cache against remapped
+pages.)*
 
 **Phases 0–9 are done.** Stock unmodified xv6 boots to a shell and passes
 `usertests` in full; an unmodified Linux 6.6 kernel boots to a user process.

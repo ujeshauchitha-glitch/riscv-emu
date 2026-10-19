@@ -154,11 +154,22 @@ constexpr u64 MSTATUS_TVM  = 1ull << 20;  // trap satp access and SFENCE.VMA
 constexpr u64 MSTATUS_TW   = 1ull << 21;  // trap WFI after a timeout
 constexpr u64 MSTATUS_TSR  = 1ull << 22;  // trap SRET
 
+// UXL and SXL: the register width of user and supervisor mode, encoded
+// 1 = 32 bits, 2 = 64 bits. On an RV64 machine that implements only RV64 they are
+// read-only and both read as 2. (They exist so that a 64-bit kernel can find out
+// whether it may run 32-bit user programs; Linux's compat support looks.)
+constexpr u64 MSTATUS_UXL    = 3ull << 32;
+constexpr u64 MSTATUS_SXL    = 3ull << 34;
+constexpr u64 MSTATUS_XL_RV64 = 2;
+
 // The bits sstatus exposes. Everything else in mstatus is machine-only and
 // reads as zero through the supervisor view.
 constexpr u64 SSTATUS_MASK = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP |
                              MSTATUS_SUM | MSTATUS_MXR | MSTATUS_FS |
-                             MSTATUS_SD;
+                             MSTATUS_UXL | MSTATUS_SD;
+
+// ...of which UXL is visible but not writable.
+constexpr u64 SSTATUS_WRITE_MASK = SSTATUS_MASK & ~MSTATUS_UXL;
 
 // The interrupt bits sie/sip expose.
 constexpr u64 SIE_SIP_MASK = (1ull << 1) | (1ull << 5) | (1ull << 9);

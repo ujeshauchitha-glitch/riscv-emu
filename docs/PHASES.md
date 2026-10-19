@@ -584,6 +584,6 @@ four deliberate breakages each caught. The vector extension is not implemented.
 Phases 0–12 and 14 are done and 13 is built in pieces. The emulator boots stock xv6 to
 an interactive shell and stock Linux 6.6 to an interactive prompt, now on several harts,
 with a network, a clock and a debugger; the bundled tests are eighteen CTest suites plus
-the four bare-metal self-tests. (The official riscv-tests suite — 125/125 at the end of
-phase 9 — needs a RISC-V toolchain and has **not** been re-run since phase 10; CI runs
-it on every push.)
+the four bare-metal self-tests. The official riscv-tests suite, re-run in full after these phases, is **128/128**
+(three previously-skipped `rv64si` tests now build and pass), and the four bare-metal
+self-tests assembled by a real RISC-V assembler pass with their original results.

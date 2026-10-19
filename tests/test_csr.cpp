@@ -139,8 +139,28 @@ void test_mstatus_masks_unimplemented_bits() {
         csr::MSTATUS_SIE | csr::MSTATUS_SPIE | csr::MSTATUS_SPP |
         csr::MSTATUS_MPRV | csr::MSTATUS_SUM | csr::MSTATUS_MXR |
         csr::MSTATUS_TVM | csr::MSTATUS_TW | csr::MSTATUS_TSR |
-        csr::MSTATUS_FS | csr::MSTATUS_SD;
+        csr::MSTATUS_FS | csr::MSTATUS_SD |
+        csr::MSTATUS_UXL | csr::MSTATUS_SXL;     // read-only; see below
     CHECK_EQ_U(status & ~implemented, 0);
+
+    // UXL and SXL say how wide user and supervisor mode are. This is an RV64-only
+    // machine, so both read as 2 (64-bit) and writing all-ones - which just
+    // happened - must not move them. (rv64si/csr in the official suite checks
+    // that sstatus.UXL reads as 2; a 64-bit kernel consults it to decide whether
+    // 32-bit user programs may run.)
+    CHECK_EQ_U((status & csr::MSTATUS_UXL) >> 32, csr::MSTATUS_XL_RV64);
+    CHECK_EQ_U((status & csr::MSTATUS_SXL) >> 34, csr::MSTATUS_XL_RV64);
+
+    // The supervisor view exposes UXL (but not SXL, which is machine-only)...
+    CHECK_EQ_U((m.cpu->csrs.read(csr::SSTATUS) & csr::MSTATUS_UXL) >> 32, csr::MSTATUS_XL_RV64);
+    CHECK_EQ_U(m.cpu->csrs.read(csr::SSTATUS) & csr::MSTATUS_SXL, 0);
+    // ...and cannot change it.
+    m.cpu->csrs.write(csr::SSTATUS, 0);
+    CHECK_EQ_U((m.cpu->csrs.read(csr::SSTATUS) & csr::MSTATUS_UXL) >> 32, csr::MSTATUS_XL_RV64);
+    m.cpu->csrs.write(csr::SSTATUS, ~0ull);
+    CHECK_EQ_U((m.cpu->csrs.read(csr::SSTATUS) & csr::MSTATUS_UXL) >> 32, csr::MSTATUS_XL_RV64);
+
+    m.cpu->csrs.write(csr::MSTATUS, ~0ull);       // restore the all-ones state the rest assumes
 
     // SD is read-only and derived: it is set exactly when FS is Dirty, so it
     // can never disagree with the field it summarises. A context switch reads
