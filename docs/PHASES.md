@@ -577,6 +577,17 @@ four deliberate breakages each caught. The vector extension is not implemented.
 **Added:** `tests/bench_cpu.cpp`, `tests/gen_bitmanip_vectors.py`, `tests/test_bitmanip.cpp`,
 `--isa`.
 
+**Found by finally running the whole official suite on this code** (a RISC-V toolchain was
+downloaded for the purpose): three `rv64si` tests had always been skipped because this
+repository's stand-in test environment lacked page-table constants and did not clear
+`mstatus` at reset as the official one does. With that fixed they ran, and one failed for a
+real reason — **`sstatus.UXL` read as 0** where the privileged spec requires 2 on RV64 (a
+64-bit kernel consults it to decide whether 32-bit user programs may run). `UXL` and `SXL`
+are now read-only 2. The other two, `dirty` and `icache-alias`, pass — the latter remaps
+pages under the decoded-instruction cache, so it is the test that would have caught a stale
+cache. The linker is also now told `-m elf64lriscv`, since some toolchains default to 32-bit
+output.
+
 **Docs:** [`14-speed-and-extensions.md`](14-speed-and-extensions.md)
 
 ---
