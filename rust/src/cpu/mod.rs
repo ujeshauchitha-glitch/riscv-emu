@@ -8,7 +8,7 @@
 //! see in a register dump. A bad decode never silently skips an instruction.
 
 mod exec;
-mod fp;
+pub mod fp;
 
 use std::cell::Cell;
 use std::io::Write;
