@@ -391,6 +391,27 @@ void test_elf_rejects_bad_images() {
     CHECK(!load_elf(make_elf(0, 0x1000, {1, 2, 3, 4}), bus).ok);
 }
 
+void test_elf_with_an_enormous_memsz_is_refused() {
+    Bus bus;
+    bus.attach(std::make_unique<Dram>(1024 * 1024));
+    // A p_memsz of 2^60 must be refused up front, not looped over.
+    auto huge = make_elf(DRAM_BASE, DRAM_BASE, {1, 2, 3, 4});
+    for (int i = 0; i < 8; ++i) huge[64 + 40 + i] = (i == 7) ? 0x10 : 0;
+    CHECK(!load_elf(huge, bus).ok);
+    // A segment aimed at a device (the UART) is refused rather than written into its registers.
+    CHECK(!load_elf(make_elf(UART0_BASE, UART0_BASE, {1, 2, 3, 4}), bus).ok);
+}
+
+void test_uart_polling_an_empty_line_asks_to_yield() {
+    std::ostringstream out;
+    Uart uart(out);
+    for (int i = 0; i < 63; ++i) uart.load(5, 1);
+    CHECK(!uart.take_yield_request());
+    uart.load(5, 1);
+    CHECK(uart.take_yield_request());
+    CHECK(!uart.take_yield_request());   // the count was reset
+}
+
 }  // namespace
 
 int main() {
@@ -410,5 +431,7 @@ int main() {
     test_elf_loads_segment_at_paddr_and_reports_entry();
     test_elf_zero_fills_bss();
     test_elf_rejects_bad_images();
+    test_elf_with_an_enormous_memsz_is_refused();
+    test_uart_polling_an_empty_line_asks_to_yield();
     return testutil::summary("devices");
 }

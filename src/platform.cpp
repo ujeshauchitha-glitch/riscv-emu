@@ -105,6 +105,12 @@ void Platform::enter_supervisor(u64 entry, u64 dtb_addr) {
 }
 
 void Platform::poll_devices() {
+    // A guest busy-polling the UART for a key it is waiting on: give the host a moment (and look for input at
+    // once) rather than spinning a core flat out. Only while real input can still arrive.
+    if (uart_ != nullptr && uart_->take_yield_request() && uart_->host_input_active()) {
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+        since_host_poll_ = 4096;
+    }
     if (uart_ != nullptr && since_host_poll_ >= 4096) {
         since_host_poll_ = 0;
         uart_->poll_host_input();

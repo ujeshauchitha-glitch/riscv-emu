@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <random>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -255,7 +256,20 @@ int main(int argc, char** argv) {
     // --- build the machine ---
     Bus bus;
 
-    auto  dram_owned = std::make_unique<Dram>(dram_size_mb * 1024 * 1024);
+    // An impossible RAM size is an error message, not an overflow or an abort: the byte count must not wrap,
+    // RAM must not run off the end of the address space, and the host must actually be able to provide it.
+    constexpr u64 kMaxDramMb = (1ull << 40) / (1024 * 1024);   // 1 TiB, far beyond any real use
+    if (dram_size_mb > kMaxDramMb) {
+        std::cerr << "error: --dram-size-mb " << dram_size_mb << " is too large\n";
+        return 2;
+    }
+    std::unique_ptr<Dram> dram_owned;
+    try {
+        dram_owned = std::make_unique<Dram>(dram_size_mb * 1024 * 1024);
+    } catch (const std::exception&) {
+        std::cerr << "error: cannot allocate " << dram_size_mb << " MiB of guest RAM\n";
+        return 1;
+    }
     Dram* dram = dram_owned.get();
     auto  uart_owned = std::make_unique<Uart>(std::cout);
     auto  clint_owned = std::make_unique<Clint>(static_cast<u32>(smp));

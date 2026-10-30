@@ -135,6 +135,18 @@ LoadedImage load_elf(const std::vector<u8>& b, Bus& bus) {
         if (!fits(b, p_offset, p_filesz)) return fail("segment extends past end of file");
         if (p_memsz < p_filesz) return fail("segment memsz < filesz");
 
+        // The whole segment, memsz included, must lie inside RAM before anything is written. Without this a
+        // crafted p_memsz of 2^60 makes the zero-fill loop below run for effectively ever, and a p_paddr that
+        // points at a device would store the segment's bytes into that device's registers.
+        {
+            const Dram* ram = bus.ram();
+            const u64 ram_end = DRAM_BASE + (ram ? ram->size() : 0);
+            if (ram == nullptr || p_paddr < DRAM_BASE || p_memsz > ram_end - DRAM_BASE ||
+                p_paddr > ram_end - p_memsz) {
+                return fail("segment does not fit in mapped memory at 0x" + std::to_string(p_paddr));
+            }
+        }
+
         // Copy the bytes present in the file...
         for (u64 j = 0; j < p_filesz; ++j) {
             Status st = bus.store(p_paddr + j, 1, b[p_offset + j]);

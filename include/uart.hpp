@@ -78,6 +78,14 @@ public:
     //   Ctrl-A <other>  passed through unchanged, prefix and all
     bool exit_requested() const { return exit_requested_; }
 
+    // True once the guest has polled the line-status register many times in a row with nothing to read. A
+    // guest spinning on the UART would otherwise pin a host core at full speed waiting for a key; the machine
+    // uses this to sleep briefly while it waits for real input. Resets the count.
+    bool take_yield_request() {
+        if (empty_polls_ >= 64) { empty_polls_ = 0; return true; }
+        return false;
+    }
+
     ~Uart() override;
 
     // Take one byte from the receive queue, or -1 if nothing is waiting.
@@ -110,6 +118,7 @@ private:
     u8 lcr_ = 0;   // line control (bit 7 = DLAB)
     u8 mcr_ = 0;   // modem control
     u8 scr_ = 0;   // scratch
+    unsigned empty_polls_ = 0;   // consecutive LSR reads that found nothing to receive
     u8 dll_ = 0;   // divisor latch, low
     u8 dlm_ = 0;   // divisor latch, high
 

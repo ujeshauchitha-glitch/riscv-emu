@@ -312,6 +312,7 @@ Result<u64> Uart::load(u64 offset, unsigned size_bytes) {
         case 0:
             if (dlab()) return Result<u64>::good(dll_);
             // RBR: take the next queued byte, or zero if nothing is waiting.
+            empty_polls_ = 0;
             if (rx_.empty()) return Result<u64>::good(0);
             {
                 const u8 c = rx_.front();
@@ -370,7 +371,8 @@ Result<u64> Uart::load(u64 offset, unsigned size_bytes) {
             // The transmitter is always ready because a write to THR completes
             // immediately - there is no real serial line to wait for.
             u8 lsr = LSR_THR_EMPTY | LSR_TRANSMIT_IDLE;
-            if (!rx_.empty()) lsr |= LSR_DATA_READY;
+            if (!rx_.empty()) { lsr |= LSR_DATA_READY; empty_polls_ = 0; }
+            else if (empty_polls_ < 1000000) ++empty_polls_;
             return Result<u64>::good(lsr);
         }
         case 6: return Result<u64>::good(0);   // modem status: nothing connected
