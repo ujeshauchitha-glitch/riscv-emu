@@ -234,6 +234,16 @@ impl Platform {
     /// timer and interrupt controller.
     pub fn poll_devices(&mut self) {
         if let Some(uart) = &self.uart {
+            // A guest busy-polling the UART for a key it is waiting on: give the host a moment (and look for
+            // input at once) rather than spinning a core flat out. Only while real input can still arrive.
+            let wait = {
+                let mut u = uart.borrow_mut();
+                u.take_yield_request() && u.host_input_active()
+            };
+            if wait {
+                std::thread::sleep(Duration::from_micros(200));
+                self.since_host_poll = 4096;
+            }
             if self.since_host_poll >= 4096 {
                 self.since_host_poll = 0;
                 uart.borrow_mut().poll_host_input();

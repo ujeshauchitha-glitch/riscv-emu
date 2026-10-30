@@ -433,3 +433,26 @@ fn an_impossible_ram_size_is_an_error_not_an_abort() {
     assert!(Bus::try_new(1 << 62).is_none());
     assert!(Bus::try_new(1024 * 1024).is_some());
 }
+
+#[test]
+fn a_guest_polling_an_empty_uart_asks_the_machine_to_yield() {
+    let (mut u, _) = uart();
+    for _ in 0..63 {
+        u.load(5, 1).unwrap();
+    }
+    assert!(!u.take_yield_request());
+    u.load(5, 1).unwrap();
+    assert!(u.take_yield_request());
+    assert!(!u.take_yield_request()); // the count was reset
+
+    // Data arriving resets the streak.
+    for _ in 0..40 {
+        u.load(5, 1).unwrap();
+    }
+    u.feed_input(b"x");
+    u.load(5, 1).unwrap();
+    for _ in 0..40 {
+        u.load(5, 1).unwrap();
+    }
+    assert!(!u.take_yield_request());
+}

@@ -46,6 +46,9 @@ const IER_TX_EMPTY: u8 = 1 << 1;
 
 const CTRL_A: u8 = 0x01;
 
+/// How many fruitless LSR reads in a row count as "the guest is waiting for input".
+const EMPTY_POLLS_BEFORE_YIELD: u32 = 64;
+
 pub struct Uart {
     out: Box<dyn Write>,
     rx: VecDeque<u8>,
@@ -56,6 +59,8 @@ pub struct Uart {
     dll: u8,
     dlm: u8,
     tx_irq: bool,
+    /// Consecutive status-register reads that found nothing to receive (a guest busy-polling).
+    empty_polls: u32,
 
     host_rx: Option<Receiver<Vec<u8>>>,
     host_eof: bool,
@@ -77,6 +82,7 @@ impl Uart {
             dll: 0,
             dlm: 0,
             tx_irq: false,
+            empty_polls: 0,
             host_rx: None,
             host_eof: false,
             escape_armed: false,
@@ -170,6 +176,17 @@ impl Uart {
         }
     }
 
+    /// True once the guest has polled the line-status register many times in a row with nothing to read.
+    /// A guest spinning on the UART would otherwise pin a host core at full speed waiting for a key;
+    /// the machine uses this to sleep briefly while it waits for real input. Resets the count.
+    pub fn take_yield_request(&mut self) -> bool {
+        if self.empty_polls >= EMPTY_POLLS_BEFORE_YIELD {
+            self.empty_polls = 0;
+            return true;
+        }
+        false
+    }
+
     pub fn exit_requested(&self) -> bool {
         self.exit_requested
     }
@@ -217,6 +234,7 @@ impl Device for Uart {
                     self.dll as u64
                 } else {
                     // RBR: take the next queued byte, or zero if nothing is waiting.
+                    self.empty_polls = 0;
                     self.rx.pop_front().unwrap_or(0) as u64
                 }
             }
@@ -258,6 +276,9 @@ impl Device for Uart {
                 let mut lsr = LSR_THR_EMPTY | LSR_TRANSMIT_IDLE;
                 if !self.rx.is_empty() {
                     lsr |= LSR_DATA_READY;
+                    self.empty_polls = 0;
+                } else {
+                    self.empty_polls = self.empty_polls.saturating_add(1);
                 }
                 lsr as u64
             }
