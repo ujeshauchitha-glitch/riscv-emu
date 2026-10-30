@@ -535,3 +535,31 @@ fn blk_image_truncated_while_running_gives_an_io_error_not_garbage() {
     drop(rig);
     std::fs::remove_file(&path).unwrap();
 }
+
+#[test]
+fn blk_snapshot_handles_an_image_that_ends_in_a_short_sector() {
+    // 8 full sectors plus 100 bytes: the last "sector" is only partly there.
+    let path = std::env::temp_dir().join(format!("riscv_emu_test_virtio_{}_short.img", std::process::id()));
+    std::fs::write(&path, vec![7u8; 8 * 512 + 100]).unwrap();
+    let mut blk = VirtioBlk::new();
+    blk.open_image(path.to_str().unwrap(), true).unwrap();
+    let mut rig = Rig::new(blk);
+    rig.setup_queue(0);
+
+    // Write the 100 tail bytes: a partial-sector write that must seed from the 100 bytes that exist.
+    rig.write_bytes(DATA1, &[0x33; 100]);
+    write_blk_header(&rig, HDR, 1, 8);
+    rig.poke(STATUS, 1, 0xff);
+    rig.post(0, &[(HDR, 16, false), (DATA1, 100, false), (STATUS, 1, true)]);
+    assert_eq!(rig.peek(STATUS, 1), 0);
+
+    write_blk_header(&rig, HDR, 0, 8);
+    rig.poke(STATUS, 1, 0xff);
+    rig.post(0, &[(HDR, 16, false), (DATA2, 100, true), (STATUS, 1, true)]);
+    assert_eq!(rig.peek(STATUS, 1), 0);
+    assert_eq!(rig.peek(DATA2, 1), 0x33);
+    assert_eq!(rig.peek(DATA2 + 99, 1), 0x33);
+    drop(rig);
+    assert_eq!(std::fs::read(&path).unwrap()[8 * 512], 7); // the host file was never touched
+    std::fs::remove_file(&path).unwrap();
+}

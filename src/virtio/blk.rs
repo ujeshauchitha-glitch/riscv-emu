@@ -179,7 +179,10 @@ impl VirtioBlk {
             let have = matches!(&self.store, Store::File { overlay, .. } if overlay.contains_key(&s));
             if !have {
                 let mut sector = [0u8; SECTOR_SIZE as usize];
-                if n != SECTOR_SIZE && !self.disk_read(s * SECTOR_SIZE, &mut sector) {
+                // An image whose size is not a multiple of 512 ends in a short sector: seed the overlay
+                // from only the bytes that exist, or a partial write there would fail on a full-sector read.
+                let avail = (self.size_bytes().saturating_sub(s * SECTOR_SIZE)).min(SECTOR_SIZE) as usize;
+                if n != SECTOR_SIZE && !self.disk_read(s * SECTOR_SIZE, &mut sector[..avail]) {
                     return false;
                 }
                 if let Store::File { overlay, .. } = &mut self.store {
