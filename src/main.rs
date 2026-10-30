@@ -284,7 +284,8 @@ fn main() {
     let dram_bytes = o.dram_size_mb.checked_mul(1024 * 1024).unwrap_or_else(|| fail("--dram-size-mb is too large"));
 
     // --- build the machine ---------------------------------------------------------
-    let mut bus = Bus::new(dram_bytes);
+    let mut bus = Bus::try_new(dram_bytes)
+        .unwrap_or_else(|| fail(format!("cannot allocate {} MiB of guest RAM", o.dram_size_mb)));
     let ram = bus.ram.clone();
 
     let (uart_dev, uart) = Shared::new(Uart::new(Box::new(std::io::stdout())));

@@ -38,12 +38,17 @@ pub struct Bus {
 
 impl Bus {
     pub fn new(ram_bytes: u64) -> Bus {
-        Bus {
-            ram: Rc::new(Dram::new(ram_bytes)),
+        Bus::try_new(ram_bytes).expect("cannot allocate guest RAM")
+    }
+
+    /// Like `new`, but reports an impossible RAM size instead of aborting.
+    pub fn try_new(ram_bytes: u64) -> Option<Bus> {
+        Some(Bus {
+            ram: Rc::new(Dram::try_new(ram_bytes)?),
             ranges: Vec::new(),
             devices: RefCell::new(Vec::new()),
             mmio_epoch: Cell::new(0),
-        }
+        })
     }
 
     /// Register a device. Ranges must not overlap (including with RAM); an

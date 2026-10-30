@@ -30,10 +30,26 @@ pub struct Dram {
 }
 
 impl Dram {
+    /// Allocate `size_bytes` of RAM, or `None` if the host cannot provide it (or the size does not fit
+    /// the address space). A huge `--dram-size-mb` must be an error message, not an abort.
+    pub fn try_new(size_bytes: u64) -> Option<Dram> {
+        let len = usize::try_from(size_bytes).ok()?;
+        // RAM sits at DRAM_BASE; it must not run off the end of the 64-bit physical address space.
+        crate::types::DRAM_BASE.checked_add(size_bytes)?;
+        let mut mem: Vec<u8> = Vec::new();
+        mem.try_reserve_exact(len).ok()?;
+        mem.resize(len, 0);
+        Some(Dram::from_vec(mem))
+    }
+
     pub fn new(size_bytes: u64) -> Dram {
-        let len = size_bytes as usize;
+        Dram::try_new(size_bytes).expect("cannot allocate guest RAM")
+    }
+
+    fn from_vec(mem: Vec<u8>) -> Dram {
+        let len = mem.len();
         Dram {
-            mem: UnsafeCell::new(vec![0u8; len]),
+            mem: UnsafeCell::new(mem),
             len,
             epoch: Cell::new(1),
             code_pages: UnsafeCell::new(vec![0u8; (len + 4095) >> 12]),

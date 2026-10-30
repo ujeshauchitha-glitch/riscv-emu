@@ -415,3 +415,21 @@ fn elf_header_fields_cannot_overflow_the_bounds_checks() {
     assert!(load_elf(&e, &bus).is_err());
 }
 
+
+#[test]
+fn elf_with_an_enormous_memsz_is_refused_quickly() {
+    let bus = Bus::new(1024 * 1024);
+    let mut e = make_elf(DRAM_BASE, DRAM_BASE, &[1, 2, 3, 4], 0);
+    e[64 + 40..64 + 48].copy_from_slice(&(1u64 << 60).to_le_bytes()); // p_memsz
+    assert!(load_elf(&e, &bus).is_err());
+    let mut e = make_elf(DRAM_BASE, u64::MAX - 2, &[1, 2, 3, 4], 0); // p_paddr + memsz wraps
+    e[64 + 40..64 + 48].copy_from_slice(&16u64.to_le_bytes());
+    assert!(load_elf(&e, &bus).is_err());
+}
+
+#[test]
+fn an_impossible_ram_size_is_an_error_not_an_abort() {
+    assert!(Bus::try_new(u64::MAX).is_none());
+    assert!(Bus::try_new(1 << 62).is_none());
+    assert!(Bus::try_new(1024 * 1024).is_some());
+}

@@ -144,6 +144,13 @@ pub fn load_elf(b: &[u8], bus: &Bus) -> Result<LoadedImage, String> {
             return Err("segment memsz < filesz".into());
         }
 
+        // A segment must fit in RAM, memsz included, before anything is written. Without this a crafted
+        // p_memsz of 2^60 would send the zero-fill loop around a million-byte chunk 2^40 times.
+        let end = p_paddr.checked_add(p_memsz).ok_or("segment address overflows")?;
+        if p_paddr < crate::types::DRAM_BASE || end > crate::types::DRAM_BASE + bus.ram.size() {
+            return Err(format!("segment {p_paddr:#x}..{end:#x} does not fit in mapped memory"));
+        }
+
         // Copy the bytes present in the file...
         let data = &b[p_offset as usize..(p_offset + p_filesz) as usize];
         if !bus.ram.write_bytes(p_paddr, data) {
