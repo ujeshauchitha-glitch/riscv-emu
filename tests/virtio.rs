@@ -563,3 +563,35 @@ fn blk_snapshot_handles_an_image_that_ends_in_a_short_sector() {
     assert_eq!(std::fs::read(&path).unwrap()[8 * 512], 7); // the host file was never touched
     std::fs::remove_file(&path).unwrap();
 }
+
+#[test]
+fn blk_does_not_drain_an_enormous_queue_in_one_doorbell() {
+    use riscv_emu::virtio::blk::MAX_REQUESTS_PER_PASS;
+    let rig = make_blk(4);
+    let total = MAX_REQUESTS_PER_PASS as u64 + 5;
+
+    // One flush request (header + status) described once, and listed `total` times on the avail ring.
+    write_blk_header(&rig, HDR, 4, 0);
+    rig.poke(STATUS, 1, 0xff);
+    let q = rig.queues[0];
+    rig.poke(q.desc, 8, HDR);
+    rig.poke(q.desc + 8, 4, 16);
+    rig.poke(q.desc + 12, 2, F_NEXT as u64);
+    rig.poke(q.desc + 14, 2, 1);
+    rig.poke(q.desc + 16, 8, STATUS);
+    rig.poke(q.desc + 24, 4, 1);
+    rig.poke(q.desc + 28, 2, F_WRITE as u64);
+    for i in 0..total {
+        rig.poke(q.avail + 4 + (i % q.num as u64) * 2, 2, 0);
+    }
+    rig.poke(q.avail + 2, 2, total);
+    rig.w32(0x050, 0); // the doorbell
+
+    // One pass handles its share and no more...
+    assert_eq!(rig.used_idx(0), MAX_REQUESTS_PER_PASS as u64);
+    // ...and the scheduler's next rounds finish the rest.
+    rig.poll();
+    assert_eq!(rig.used_idx(0), total);
+    rig.poll();
+    assert_eq!(rig.used_idx(0), total); // nothing left, nothing duplicated
+}

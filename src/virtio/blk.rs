@@ -46,8 +46,18 @@ enum Store {
     File { file: File, size: u64, snapshot: bool, overlay: HashMap<u64, [u8; SECTOR_SIZE as usize]> },
 }
 
+/// How many requests one pass over the queue handles, and roughly how many bytes it moves. A guest
+/// may queue dozens of requests at once; doing them all inside the doorbell write would stall every
+/// hart behind one device. The rest is picked up by `poll`, on the next scheduling round.
+pub const MAX_REQUESTS_PER_PASS: usize = 8;
+const MAX_BYTES_PER_PASS: u64 = 1 << 20;
+
 pub struct VirtioBlk {
     store: Store,
+    /// A pass stopped at its budget, so there may be more waiting.
+    backlog: bool,
+    /// Staging buffer for data transfers, allocated once rather than per request.
+    chunk: Vec<u8>,
 }
 
 impl Default for VirtioBlk {
@@ -58,7 +68,7 @@ impl Default for VirtioBlk {
 
 impl VirtioBlk {
     pub fn new() -> VirtioBlk {
-        VirtioBlk { store: Store::Memory(Vec::new()) }
+        VirtioBlk { store: Store::Memory(Vec::new()), backlog: false, chunk: Vec::new() }
     }
 
     /// Read a whole image into memory. The guest's writes never reach the file.
@@ -258,7 +268,8 @@ impl VirtioBlk {
                 } else if total != 0 {
                     // Move the data one buffer at a time, bounded by a modest staging
                     // buffer so a 64 MiB request does not allocate 64 MiB.
-                    let mut chunk = vec![0u8; 64 * 1024];
+                    let mut chunk = std::mem::take(&mut self.chunk);
+                    chunk.resize(64 * 1024, 0);
                     let mut disk_offset = sector * SECTOR_SIZE;
                     'segments: for s in data {
                         let mut done = 0u64;
@@ -283,6 +294,7 @@ impl VirtioBlk {
                             written += s.len;
                         }
                     }
+                    self.chunk = chunk;
                 }
             }
             BLK_T_FLUSH => {
@@ -310,6 +322,26 @@ impl VirtioBlk {
         // [last] the status byte, which the device always writes.
         core.write_guest_bytes(last.addr, &[status]);
         core.push_used(queue, head, written + 1);
+    }
+}
+
+impl VirtioBlk {
+    /// Handle waiting requests, up to the per-pass budget; anything left over is finished by `poll`.
+    fn service(&mut self, core: &mut Core, queue: u32) {
+        let (mut done, mut bytes) = (0usize, 0u64);
+        self.backlog = false;
+        while let Some((head, segs)) = core.pop_chain(queue) {
+            bytes += segs.iter().map(|s| s.len as u64).sum::<u64>();
+            self.process_request(core, queue, head, &segs);
+            done += 1;
+            if done >= MAX_REQUESTS_PER_PASS || bytes >= MAX_BYTES_PER_PASS {
+                self.backlog = true;
+                break;
+            }
+        }
+        if done > 0 {
+            core.signal_used(queue);
+        }
     }
 }
 
@@ -354,13 +386,12 @@ impl VirtioDevice for VirtioBlk {
     }
 
     fn notify(&mut self, core: &mut Core, queue: u32) {
-        let mut any = false;
-        while let Some((head, segs)) = core.pop_chain(queue) {
-            self.process_request(core, queue, head, &segs);
-            any = true;
-        }
-        if any {
-            core.signal_used(queue);
+        self.service(core, queue);
+    }
+
+    fn poll(&mut self, core: &mut Core) {
+        if self.backlog {
+            self.service(core, 0);
         }
     }
 }
