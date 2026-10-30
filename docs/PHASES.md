@@ -323,7 +323,7 @@ scan over every source. Caching the result behind a dirty flag took the emulator
 from 7M to **15.4M instructions per second** — 2.4×, and the difference between
 a boot measured in seconds and one measured in minutes.
 
-**Tests:** `tests/test_interrupt_devices.cpp`, 728 checks over both devices —
+**Tests:** `tests/interrupt_devices.rs`, 728 checks over both devices —
 arbitration by priority rather than IRQ number (verified in both directions),
 the full claim/complete cycle, context independence, sector-accurate reads and
 writes, interrupt delivery and acknowledgement, consecutive requests, and a
@@ -372,7 +372,7 @@ decompressor that had quietly assumed every instruction is four bytes:
   that would invalidate it. It still broke: a note in a comment is not a
   mechanism.
 
-**Tests:** `tests/test_compressed.cpp`, 101 checks - including 57 rows of
+**Tests:** `tests/compressed.rs`, 101 checks - including 57 rows of
 encodings produced by the real GNU assembler, each pairing a compressed
 instruction with the assembler's encoding of its documented expansion, with
 immediates at both extremes of every field's range. Plus the official `rv64uc`
@@ -408,7 +408,7 @@ differs only on an exact tie.
 ### Part 3: the device tree
 
 Linux gets everything it knows about the machine from a blob left in memory.
-`src/fdt.cpp` generates it directly rather than shelling out to `dtc` - not for
+`src/fdt.rs` generates it directly rather than shelling out to `dtc` - not for
 dependency reasons but because it is then built from the same constants in
 `types.hpp` the devices are attached with, so it cannot drift out of agreement
 with them. The runner validates it by parsing it back with `dtc`.
@@ -429,7 +429,7 @@ Clearing MTIP in `set_timer` is required and easy to miss: the interrupt that
 just fired is still pending, and leaving it set makes the kernel re-enter its
 timer handler every instruction - which looks exactly like a hang.
 
-**Tests:** `tests/test_float.cpp` (124 checks), `tests/test_firmware.cpp` (76).
+**Tests:** `tests/float.rs` (124 checks), `tests/firmware.rs` (76).
 **125/125 riscv-tests**, now including `rv64uf` 11/11 and `rv64ud` 12/12.
 
 **Docs:** [`08-linux-prerequisites.md`](08-linux-prerequisites.md)
@@ -509,7 +509,7 @@ Also found while wiring it up: `WFI` idling, applied unconditionally, would stal
 official `riscv-tests` `wfi` test, which executes a `WFI` with nothing pending and
 expects to continue. Idling is now opt-in and only a Linux boot enables it.
 
-**Added:** `--smp`, `--quantum`; `tests/test_smp.cpp` (LR/SC, IPI and the idle
+**Added:** `--smp`, `--quantum`; `tests/smp.rs` (LR/SC, IPI and the idle
 clock-skip were mutation-checked).
 
 **Docs:** [`10-multiple-harts.md`](10-multiple-harts.md)
@@ -532,8 +532,8 @@ the wrong `libstdc++-6.dll`; the program exits instantly with `0xc0000139`, or a
 hang a test runner on the loader's error dialog. The build now links statically.
 
 **Added:** `--drive`, `--drive-snapshot`, `--net`, `--net-dns`, `--rng`, `--rng-seed`,
-`--rtc`, `--rtc-fixed`; a Windows console for the UART; `tests/test_virtio.cpp`,
-`tests/test_usernet.cpp` (real loopback sockets, a full TCP connection; mutation-checked).
+`--rtc`, `--rtc-fixed`; a Windows console for the UART; `tests/virtio.rs`,
+`tests/usernet.rs` (real loopback sockets, a full TCP connection; mutation-checked).
 
 **Docs:** [`11-virtio-and-networking.md`](11-virtio-and-networking.md)
 
@@ -546,7 +546,7 @@ watchpoints, stepping, Ctrl-C, harts as threads, `monitor` commands. Breakpoints
 emulator's, not the guest's — nothing in guest memory is patched. The command handler
 touches no socket, so almost all of it is tested by feeding it the strings gdb sends.
 
-**Added:** `tests/test_gdbstub.cpp` (95 checks; breakpoints, watchpoints and register
+**Added:** `tests/gdb.rs` (95 checks; breakpoints, watchpoints and register
 encoding mutation-checked; also driven against the real process by an independent client).
 Not tested against a real RISC-V-capable gdb — none was available.
 
@@ -574,7 +574,7 @@ TLB, a RAM fast path, and devices polled per round instead of per instruction: *
 checked against an independent Python model over 89,122 vectors, with 0 mismatches and
 four deliberate breakages each caught. The vector extension is not implemented.
 
-**Added:** `tests/bench_cpu.cpp`, `tests/gen_bitmanip_vectors.py`, `tests/test_bitmanip.cpp`,
+**Added:** `tests/bench_cpu.cpp`, `tests/gen_bitmanip_vectors.py`, `tests/bitmanip.rs`,
 `--isa`.
 
 **Found by finally running the whole official suite on this code** (a RISC-V toolchain was
@@ -598,3 +598,8 @@ with a network, a clock and a debugger; the bundled tests are eighteen CTest sui
 the four bare-metal self-tests. The official riscv-tests suite, re-run in full after these phases, is **128/128**
 (three previously-skipped `rv64si` tests now build and pass), and the four bare-metal
 self-tests assembled by a real RISC-V assembler pass with their original results.
+
+## Rewrite in Rust
+
+The whole emulator was ported to Rust and the C++ removed; behaviour was verified against the C++
+build instruction-for-instruction. See [`15-rust-port.md`](15-rust-port.md).

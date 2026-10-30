@@ -1,10 +1,12 @@
 # RISC-V Emulator
 
-An RV64 emulator written in modern C++20, built to boot a real operating system —
+An RV64 emulator written in Rust, built to boot a real operating system —
 **xv6-riscv** first, then **Linux**, then a full **Debian** with several cores, a
 network, and a debugger to attach to it.
 
-No dependencies: a C++20 compiler and CMake ≥ 3.16 are all you need.
+No dependencies: Rust (stable, 1.75 or newer) and a C linker are all you need — the crate uses only
+the standard library. (It began as C++20 and was rewritten in Rust; see
+[`docs/15-rust-port.md`](docs/15-rust-port.md). The C++ version is in the git history.)
 
 ## Status
 
@@ -170,38 +172,38 @@ rebuild.
 ## Build
 
 ```bash
-cmake -S . -B build
-cmake --build build
+cargo build --release
 ```
 
 ## Run
 
 ```bash
 # Built-in demo: prints over the UART, then powers the machine off
-./build/riscv_emu
+./target/release/riscv_emu
 
 # One line per retired instruction, on stderr
-./build/riscv_emu --trace
+./target/release/riscv_emu --trace
 
 # Run an ELF64 image, or a flat binary loaded at 0x8000_0000.
 # The format is detected from the file's magic number.
-./build/riscv_emu path/to/kernel.elf
+./target/release/riscv_emu path/to/kernel.elf
 
 # Boot xv6 by hand (scripts/boot-xv6.sh does all of this for you)
-./build/riscv_emu --disk fs.img --max-steps 1000000000000 kernel/kernel
+./target/release/riscv_emu --disk fs.img --max-steps 1000000000000 kernel/kernel
 
 # Four cores, a persistent disk, networking, a clock and entropy
-./build/riscv_emu --linux --smp 4 --drive debian.img --net user --rng --rtc Image
+./target/release/riscv_emu --linux --smp 4 --drive debian.img --net user --rng --rtc Image
 
 # Wait for gdb on port 1234 before running anything
-./build/riscv_emu --gdb 1234 --linux Image
+./target/release/riscv_emu --gdb 1234 --linux Image
 
-# The bare-metal self-tests (built when a RISC-V toolchain is installed).
-# Each stops on ebreak with one bit set in a0 per passing check.
-./build/riscv_emu --dump build/rv64i_selftest.bin   # expect a0 = 0x3fff
-./build/riscv_emu --dump build/trap_selftest.bin    # expect a0 = 0xfff
-./build/riscv_emu --dump build/muldiv_atomic_selftest.bin  # expect a0 = 0x7fff
-./build/riscv_emu build/device_selftest.bin         # prints, then powers off
+# The bare-metal self-tests in examples/*.S are assembled and run by `cargo test` when a
+# RISC-V toolchain is installed (cargo test --test selftests). Each stops on ebreak with
+# one bit set in a0 per passing check. By hand:
+riscv64-unknown-elf-as -march=rv64i -mabi=lp64 -o st.o examples/rv64i_selftest.S
+riscv64-unknown-elf-ld -m elf64lriscv -T examples/link.ld -o st.elf st.o
+riscv64-unknown-elf-objcopy -O binary st.elf st.bin
+./target/release/riscv_emu --dump st.bin            # expect a0 = 0x3fff
 ```
 
 `--help` lists all options. [`docs/RUNNING.md`](docs/RUNNING.md) is the full
@@ -211,17 +213,19 @@ read a trace or a stop message when something goes wrong.
 ## Test
 
 ```bash
-cd build && ctest --output-on-failure
+cargo test --release
 ```
 
-Eighteen suites: unit tests for the decoder, the bus, the CPU, the RV64I
+About 300 tests: unit tests for the decoder, the bus, the CPU, the RV64I
 instruction set, the CSR/trap machinery, the M/A extensions, the devices,
 supervisor mode with the MMU, the PLIC and virtio block device, the
 compressed-instruction decoder, floating point, the device tree and SBI, **multiple
 harts, the virtio devices, the user-mode network (against real sockets), the GDB
 server, and the bit-manipulation extensions (against an independent Python model)** —
 plus four bare-metal self-tests assembled with a real RISC-V toolchain.
-`./build/bench_cpu` is a throughput benchmark, built but not run as a test. The self-tests are skipped automatically
+The command-line binary is tested end to end, and the soft-float unit is checked against an exact
+rational reference (45,000 vectors, every rounding mode) and the host FPU.
+`cargo run --release --example bench_cpu` is a throughput benchmark. The self-tests are skipped automatically
 when no toolchain is present - to enable them:
 
 ```bash
@@ -248,35 +252,38 @@ fetched into `third_party/` on first run and needs a RISC-V toolchain.
 ## Layout
 
 ```
-include/          src/
-  types.hpp         Widths, memory map, sign_extend
-  trap.hpp          Exception and interrupt cause codes      trap.cpp
-  result.hpp        Result<T> / Status — traps as values
-  device.hpp        The Device interface, AccessType
-  bus.hpp           Address decoding                         bus.cpp
-  dram.hpp          Guest RAM at 0x8000_0000                 dram.cpp
-  decoder.hpp       u32 -> DecodedInst                       decoder.cpp
-  cpu.hpp           Registers, fetch / decode / execute      cpu.cpp
-  csr.hpp           Control and status registers             csr.cpp
-  uart.hpp          NS16550A console                         uart.cpp
-  clint.hpp         Timer and software interrupts            clint.cpp
-  syscon.hpp        Poweroff / reboot                        syscon.cpp
-  elf_loader.hpp    ELF64 image loading                      elf_loader.cpp
-  mmu.hpp           Sv39 translation and the TLB             mmu.cpp
-  platform.hpp      Harts + shared devices, scheduling       platform.cpp
-  plic.hpp          External interrupts (per-hart contexts)  plic.cpp
-  virtio_mmio.hpp   The virtio transport                     virtio_mmio.cpp
-  virtio.hpp        Block device                             virtio.cpp
-  virtio_net.hpp    Network card, entropy source             virtio_net.cpp
-  usernet.hpp       User-mode network (DHCP/DNS/TCP proxy)   usernet.cpp
-  hostnet.hpp       Portable host sockets                    hostnet.cpp
-  rtc.hpp           Real-time clock                          rtc.cpp
-  gdbstub.hpp       GDB remote-protocol server               gdbstub.cpp
-  bitmanip.hpp      Zba/Zbb/Zbc/Zbs/Zicond arithmetic        cpu_bitmanip.cpp
-                    Command line                             main.cpp
+src/
+  lib.rs            The crate root
+  types.rs          Widths, memory map, sign_extend
+  trap.rs           Exception and interrupt causes, Trap, Res<T> — traps as values
+  device.rs         The Device trait, AccessType
+  bus.rs            Address decoding, the Shared<T> device adapter
+  dram.rs           Guest RAM at 0x8000_0000
+  decoder.rs        u32 -> DecodedInst, the C-extension expander
+  cpu/mod.rs        One hart: state, fetch, trap entry, the step loop
+  cpu/exec.rs       Execute: base ISA, M, A, Zicsr, Zb*, system instructions
+  cpu/fp.rs         F and D: NaN boxing, FS, the OP-FP instructions
+  softfloat.rs      IEEE-754 binary32/64 in integers: five rounding modes, exact flags
+  csr.rs            Control and status registers
+  mmu.rs            Sv39 translation and the TLB
+  bitmanip.rs       Zba/Zbb/Zbc/Zbs/Zicond arithmetic
+  backends.rs       Optional register-file and ALU backends
+  uart.rs           NS16550A console (host terminal in raw mode)
+  clint.rs          Timer and software interrupts, the shared clock
+  plic.rs           External interrupts (per-hart contexts)
+  syscon.rs         Poweroff / reboot
+  rtc.rs            Real-time clock
+  sbi.rs            Firmware services for supervisor mode
+  fdt.rs            Device tree generator
+  elf.rs            ELF64 image loading
+  platform.rs       Harts + shared devices, deterministic scheduling
+  virtio/           The virtio transport, block device, network card, entropy source
+  net/              User-mode network (DHCP/DNS/TCP proxy) and host sockets
+  gdb.rs            GDB remote-protocol server
+  main.rs           Command line
 
-examples/         Bare-metal assembly + linker script
-tests/            Unit tests and the self-test harness
+examples/         Bare-metal assembly, linker script, the benchmark
+tests/            Integration tests, differential tests, the Python reference models
 docs/             Design notes, one per phase
 ```
 

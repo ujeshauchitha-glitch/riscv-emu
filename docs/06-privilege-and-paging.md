@@ -53,7 +53,7 @@ inside code that has every right to assume they cannot. `sie`/`sip` work the
 same way over `mie`/`mip`.
 
 The masking is also a security boundary: a supervisor writing all-ones to
-`sstatus` must not thereby set `mstatus.MIE` or `MPP`. `tests/test_supervisor.cpp`
+`sstatus` must not thereby set `mstatus.MIE` or `MPP`. `tests/supervisor.rs`
 checks exactly that.
 
 ## Trap delegation
@@ -189,7 +189,7 @@ entry that touches no registers is also simply the right design.
 
 ## Testing
 
-**`tests/test_supervisor.cpp`** — 78 checks: the view semantics and their
+**`tests/supervisor.rs`** — 78 checks: the view semantics and their
 masking, privilege transitions, delegation (including that machine-mode traps
 are never delegated), the Sv39 walk, every permission rule, `SUM` and `MXR`,
 `A`/`D` updates, the non-canonical address rule, superpage alignment, TLB

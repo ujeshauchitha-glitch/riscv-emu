@@ -17,7 +17,7 @@ twice over.
 - **Somebody has to decide who runs.** The harts execute on one host thread, so
   they take turns.
 
-The `Platform` ([`include/platform.hpp`](../include/platform.hpp)) is that
+The `Platform` ([`src/platform.rs`](../src/platform.rs)) is that
 somebody. It owns the harts, schedules them, and polls the shared devices.
 
 ## Scheduling: deterministic quanta
@@ -137,8 +137,8 @@ them, the guest has deadlocked itself. The platform reports that
 ## Using it
 
 ```bash
-./build/riscv_emu --smp 4 --linux --initrd ... Image   # four harts under Linux
-./build/riscv_emu --smp 2 image.elf                    # bare metal: every hart starts at the entry point
+./target/release/riscv_emu --smp 4 --linux --initrd ... Image   # four harts under Linux
+./target/release/riscv_emu --smp 2 image.elf                    # bare metal: every hart starts at the entry point
 ```
 
 On bare metal every hart comes out of reset at the same address, as on real
@@ -146,7 +146,7 @@ hardware, and sorts itself out by reading `mhartid`.
 
 ## Tests
 
-[`tests/test_smp.cpp`](../tests/test_smp.cpp) runs real RISC-V code on several
+[`tests/smp.rs`](../tests/smp.rs) runs real RISC-V code on several
 harts: each hart reading its own id; an AMO counter that must be exact across four
 harts interleaving every 7 instructions; LR/SC cancelled by another hart's store
 (and *not* cancelled by a store elsewhere); a software interrupt sent through the

@@ -30,7 +30,14 @@ LINUX_TAG="v6.6"
 SRC_DIR="third_party/linux"
 INITRAMFS_DIR="build/initramfs"
 INITRAMFS="build/initramfs.cpio"
-EMU="build/riscv_emu"
+EMU="${EMU:-target/release/riscv_emu}"
+
+# The release binary lives in target/; on Windows it has an .exe suffix.
+emu_path() {
+  for p in "$1" "$1.exe"; do [ -x "$p" ] && { echo "$p"; return; }; done
+  echo "$1"
+}
+EMU="$(emu_path "$EMU")"
 
 # Enough memory for the kernel, the initramfs and a page cache. The device tree
 # reports this same number, so the kernel's idea of memory always matches the
@@ -79,9 +86,8 @@ done
 
 if [ ! -x "$EMU" ]; then
   step "Building the emulator"
-  cmake -S . -B build > /dev/null || die "cmake configure failed"
-  cmake --build build -j"$(nproc 2>/dev/null || echo 4)" > /dev/null \
-    || die "emulator build failed"
+  cargo build --release --quiet || die "emulator build failed"
+  EMU="$(emu_path "$EMU")"
 fi
 
 # --- the initramfs ----------------------------------------------------------

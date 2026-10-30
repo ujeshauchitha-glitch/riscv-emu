@@ -95,7 +95,7 @@ So expect to meet something. When you do, in rough order of likelihood:
 - **Hangs waiting for something.** `--rng-seed 1` removes entropy as a variable;
   `--rtc-fixed 1760000000` removes the clock as one.
 - **Slow.** A boot is about a billion instructions. Bigger `--quantum` is faster;
-  `--smp 1` is faster still. `build/bench_cpu` measures the interpreter.
+  `--smp 1` is faster still. `cargo run --release --example bench_cpu --` measures the interpreter.
 - **No network.** In the guest: `ip addr` should show `10.0.2.15`; `ping 10.0.2.2` tests
   the gateway; `curl` tests TCP. (`ping` to anything beyond the gateway is not answered —
   see [phase 11](11-virtio-and-networking.md).)

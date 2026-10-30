@@ -65,7 +65,7 @@ allocators, `czero` for branch-free selects. `misa` reports `B`, and the device 
 
 None adds an opcode. Each is a set of new `(funct7, funct3)` or `(funct12, funct3)`
 combinations *inside* ALU opcodes the base ISA already uses, so they are tried as a
-pre-check in the four existing dispatchers (`src/cpu_bitmanip.cpp`) and anything else
+pre-check in the four existing dispatchers (`src/cpu/exec.rs`) and anything else
 falls through exactly as before. The "unrecognised encodings must trap" rule still holds,
 and is tested for the neighbours.
 

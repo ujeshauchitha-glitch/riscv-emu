@@ -20,7 +20,7 @@ It found a real bug on the first run. More on that below.
 ## Why this matters more than the tests written so far
 
 The unit tests in `tests/` build their programs with encoders written separately
-from `src/decoder.cpp`, and the self-tests in `examples/` go further by using
+from `src/decoder.rs`, and the self-tests in `examples/` go further by using
 the real GNU assembler. Both are genuine independent checks of the *encoding*.
 
 Neither is an independent check of the *semantics*. If I misread what `SRAIW`
@@ -92,7 +92,7 @@ and then spins forever, so there is nothing to observe except the write itself.
 Two pieces were added:
 
 **Symbol lookup.** The ELF loader now walks the section headers for a symbol
-table and resolves `tohost` by name (`find_symbol` in `src/elf_loader.cpp`). No
+table and resolves `tohost` by name (`find_symbol` in `src/elf.rs`). No
 hard-coded address, and nothing to pass on the command line.
 
 **Polling.** `Cpu::run()` reads that address after each instruction and stops
@@ -169,7 +169,7 @@ A failure names the check that failed, so you can go straight to it:
 FAIL sraiw            FAIL: test 7 failed, after 62 instruction(s)
 
   Re-run one with:
-    build/riscv_emu --trace build/riscv-tests/rv64ui-sraiw.elf
+    target/release/riscv_emu --trace build/riscv-tests/rv64ui-sraiw.elf
 ```
 
 Test 7 is the seventh `TEST_*` macro in `third_party/riscv-tests/isa/rv64ui/sraiw.S`.

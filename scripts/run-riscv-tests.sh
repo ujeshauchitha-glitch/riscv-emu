@@ -21,7 +21,8 @@ REPO_URL="https://github.com/riscv-software-src/riscv-tests.git"
 SRC_DIR="third_party/riscv-tests"
 BUILD_DIR="build/riscv-tests"
 ENV_DIR="tests/riscv-tests-env"
-EMU="${EMU:-build/riscv_emu}"
+EMU="${EMU:-target/release/riscv_emu}"
+[ -x "$EMU" ] || [ ! -x "$EMU.exe" ] || EMU="$EMU.exe"
 
 # Suites the emulator can run today. rv64si needs supervisor mode (phase 6) and
 # rv64uf/rv64ud need floating point (phase 8), so they are deliberately absent.
@@ -82,7 +83,7 @@ if [ -z "$CROSS" ]; then
   exit 2
 fi
 
-[ -x "$EMU" ] || { echo "error: $EMU not built. Run: cmake --build build"; exit 2; }
+[ -x "$EMU" ] || { echo "error: $EMU not built. Run: cargo build --release"; exit 2; }
 
 # --- fetch the suite --------------------------------------------------------
 if [ ! -d "$SRC_DIR/isa" ]; then

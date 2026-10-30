@@ -65,9 +65,8 @@ check() {
 printf '%sriscv-emu setup check%s  %s(%s)%s\n\n' "$BOLD" "$OFF" "$DIM" "$DISTRO" "$OFF"
 
 printf '%sTo build and run the emulator%s\n' "$BOLD" "$OFF"
-check "C++20 compiler"   "g++ clang++" core
-check "CMake"            "cmake"       core
-check "make"             "make"        core
+check "Rust toolchain (cargo)" "cargo" core
+check "C linker (for Rust)"   "cc gcc clang" core
 
 printf '\n%sTo run the test suites and boot xv6%s\n' "$BOLD" "$OFF"
 check "RISC-V bare-metal toolchain" \
@@ -100,7 +99,7 @@ printf '\n%sTo install what is missing:%s\n\n' "$BOLD" "$OFF"
 case "$DISTRO" in
   fedora)
     [ "$MISSING_CORE" = 1 ] &&
-      echo "  sudo dnf install gcc-c++ cmake make"
+      echo "  sudo dnf install cargo rust gcc      # or: https://rustup.rs"
     [ "$MISSING_BARE" = 1 ] &&
       echo "  sudo dnf install gcc-riscv64-elf binutils-riscv64-elf git"
     [ "$MISSING_LINUX" = 1 ] &&
@@ -110,7 +109,7 @@ case "$DISTRO" in
     ;;
   debian)
     [ "$MISSING_CORE" = 1 ] &&
-      echo "  sudo apt install build-essential cmake"
+      echo "  sudo apt install cargo build-essential   # or: https://rustup.rs"
     [ "$MISSING_BARE" = 1 ] &&
       echo "  sudo apt install gcc-riscv64-unknown-elf git"
     [ "$MISSING_LINUX" = 1 ] &&
@@ -119,19 +118,19 @@ case "$DISTRO" in
     echo "  sudo apt install device-tree-compiler   # optional"
     ;;
   arch)
-    [ "$MISSING_CORE" = 1 ]  && echo "  sudo pacman -S gcc cmake make"
+    [ "$MISSING_CORE" = 1 ]  && echo "  sudo pacman -S rust gcc"
     [ "$MISSING_BARE" = 1 ]  && echo "  sudo pacman -S riscv64-elf-gcc riscv64-elf-binutils git"
     [ "$MISSING_LINUX" = 1 ] && echo "  sudo pacman -S riscv64-linux-gnu-gcc flex bison bc cpio openssl"
     echo "  sudo pacman -S dtc          # optional"
     ;;
   suse)
-    [ "$MISSING_CORE" = 1 ]  && echo "  sudo zypper install gcc-c++ cmake make"
+    [ "$MISSING_CORE" = 1 ]  && echo "  sudo zypper install cargo gcc"
     [ "$MISSING_BARE" = 1 ]  && echo "  sudo zypper install cross-riscv64-gcc13 git"
     [ "$MISSING_LINUX" = 1 ] && echo "  sudo zypper install flex bison bc cpio libopenssl-devel libelf-devel"
     ;;
   *)
     echo "  Could not identify the distribution. The packages needed are:"
-    echo "    a C++20 compiler, CMake, make"
+    echo "    Rust (cargo, 1.75 or newer) and a C linker"
     echo "    a RISC-V bare-metal toolchain (riscv64-unknown-elf or riscv64-elf)"
     echo "    a RISC-V Linux toolchain (riscv64-linux-gnu), flex, bison, bc, cpio"
     ;;

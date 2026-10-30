@@ -71,7 +71,14 @@ LINUX_TAG="v6.6"
 SRC_DIR="third_party/linux"
 BUILD_DIR="build/debian"
 ROOTFS_IMG="$BUILD_DIR/rootfs.ext2"
-EMU="build/riscv_emu"
+EMU="${EMU:-target/release/riscv_emu}"
+
+# The release binary lives in target/; on Windows it has an .exe suffix.
+emu_path() {
+  for p in "$1" "$1.exe"; do [ -x "$p" ] && { echo "$p"; return; }; done
+  echo "$1"
+}
+EMU="$(emu_path "$EMU")"
 MAX_STEPS=100000000000
 
 while [ $# -gt 0 ]; do
@@ -140,8 +147,8 @@ mkdir -p "$BUILD_DIR"
 
 if [ ! -x "$EMU" ]; then
   step "Building the emulator"
-  cmake -S . -B build > /dev/null || die "cmake configure failed"
-  cmake --build build -j"$JOBS" > /dev/null || die "emulator build failed"
+  cargo build --release --quiet || die "emulator build failed"
+  EMU="$(emu_path "$EMU")"
 fi
 
 # --- the root filesystem ----------------------------------------------------

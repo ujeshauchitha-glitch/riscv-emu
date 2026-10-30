@@ -27,7 +27,14 @@ cd "$(dirname "$0")/.."
 
 REPO_URL="https://github.com/mit-pdos/xv6-riscv.git"
 SRC_DIR="third_party/xv6-riscv"
-EMU="build/riscv_emu"
+EMU="${EMU:-target/release/riscv_emu}"
+
+# The release binary lives in target/; on Windows it has an .exe suffix.
+emu_path() {
+  for p in "$1" "$1.exe"; do [ -x "$p" ] && { echo "$p"; return; }; done
+  echo "$1"
+}
+EMU="$(emu_path "$EMU")"
 
 # xv6 reaches the shell at roughly 500 million instructions, so the emulator's
 # 100-million default would stop it partway through boot. This budget is large
@@ -73,17 +80,16 @@ command -v make > /dev/null || die "make not found"
 command -v git  > /dev/null || die "git not found"
 
 if [ ! -x "$EMU" ]; then
-  command -v cmake > /dev/null || die "cmake not found, and $EMU is not built.
-Install cmake, or build the emulator some other way first."
+  command -v cargo > /dev/null || die "cargo not found, and $EMU is not built.
+Install Rust (https://rustup.rs, or your distribution's cargo package) first."
 fi
 
 # --- the emulator -----------------------------------------------------------
 
 if [ ! -x "$EMU" ]; then
   step "Building the emulator"
-  cmake -S . -B build > /dev/null || die "cmake configure failed"
-  cmake --build build -j"$(nproc 2>/dev/null || echo 4)" > /dev/null \
-    || die "emulator build failed"
+  cargo build --release --quiet || die "emulator build failed"
+  EMU="$(emu_path "$EMU")"
 fi
 
 # --- xv6 --------------------------------------------------------------------

@@ -32,7 +32,7 @@ adding `if` branches inside `execute()` would have helped, because the
 information simply was not passed in. This had to change before instruction
 number two, which is why "just add more instructions" was not an option.
 
-The fix is `DecodedInst` (`include/decoder.hpp`) — a struct carrying every
+The fix is `DecodedInst` (`src/decoder.rs`) — a struct carrying every
 field, so `execute()` receives the whole instruction rather than four of its
 parts.
 
@@ -121,7 +121,7 @@ lived on the stack — so an out-of-range *write* corrupted the host process's o
 stack directly.
 
 Now every access is checked, including the subtle case where an access starts in
-range but its width runs off the end (`Dram::in_range`, `src/dram.cpp`). Out of
+range but its width runs off the end (`Dram::in_range`, `src/dram.rs`). Out of
 range returns a trap to the guest instead of touching host memory.
 
 ### Problem two: there was nowhere to put devices
@@ -145,7 +145,7 @@ store it anywhere — it prints a character.
 With a flat array there is no decoder and therefore nowhere to attach a console.
 No console means a guest OS cannot print, which means there is no way to tell
 whether it booted. Every device phase from here on hangs off `Bus`
-(`include/bus.hpp`) and the `Device` interface (`include/device.hpp`).
+(`src/bus.rs`) and the `Device` interface (`src/device.rs`).
 
 Note also that DRAM now starts at **0x8000_0000**, not 0. That is not a
 stylistic choice: the low addresses are reserved for MMIO, and both xv6 and
@@ -157,8 +157,8 @@ stops with a clear cause.
 
 ## 3. Traps are return values, not exceptions
 
-Every memory access and every instruction can fail. The natural C++ instinct is
-`throw`. That instinct is wrong here, and it is worth understanding why.
+Every memory access and every instruction can fail. The natural instinct in a
+language with exceptions is `throw` (or, in Rust, `panic!`). That instinct is wrong here, and it is worth understanding why.
 
 In an operating system, "failure" means the guest takes a trap — and traps are
 not rare. They are the normal mechanism by which an OS works:
@@ -169,20 +169,19 @@ not rare. They are the normal mechanism by which an OS works:
 
 These are hot-path control flow, not exceptional conditions. So instead:
 
-```cpp
-Result<u64> load(...);   // either a value, or a Trap
-Status      store(...);  // either OK, or a Trap
+```rust
+fn load(...)  -> Res<u64>;   // either a value, or a Trap
+fn store(...) -> Res<()>;    // either OK, or a Trap
 ```
 
-This is the errors-as-values pattern — the same shape as `std::expected`, or as
-Rust's `Result<T, E>` if that is a more familiar reference. (The project is
-C++20 throughout; `std::expected` is C++23, so `include/result.hpp` is a small
-hand-rolled stand-in for it.)
+This is the errors-as-values pattern: `Res<T>` is `Result<T, Trap>` (`src/trap.rs`).
+The first version of this project was C++20, where `std::expected` was not yet
+available and a small hand-rolled `Result<T>` played the same role.
 
 It keeps the trap path visible in the type signature — you cannot forget to
 handle it — and avoids stack unwinding on a path that executes constantly.
 
-The `AccessType` enum (`include/device.hpp`) is a related detail worth noticing:
+The `AccessType` enum (`src/device.rs`) is a related detail worth noticing:
 the *same* failure produces a different trap cause depending on why memory was
 touched. Reading an unmapped address during instruction fetch is an
 `InstructionAccessFault`; reading it for a load is a `LoadAccessFault`. That
@@ -214,7 +213,7 @@ physical instruction bit position* across as many formats as possible. A
 hardware decoder can then wire those bits straight through to the immediate with
 almost no multiplexing, which is real gates saved on real silicon. RISC-V pushes
 that cost onto the assembler and onto emulator authors — a few lines of shifting
-in `src/decoder.cpp` — rather than onto every chip that implements it.
+in `src/decoder.rs` — rather than onto every chip that implements it.
 
 Two further details that are easy to get wrong:
 
@@ -224,7 +223,7 @@ Two further details that are easy to get wrong:
 - **U-type immediates are sign-extended from bit 31.** `lui x1, 0x80000`
   produces a *negative* 64-bit value on RV64, not `0x0000000080000000`.
 
-`sign_extend()` in `include/types.hpp` does the shift-left-then-arithmetic-
+`sign_extend()` in `src/types.rs` does the shift-left-then-arithmetic-
 shift-right trick that all of these rely on.
 
 ---
@@ -238,53 +237,54 @@ amount needs 6 bits (you can shift by up to 63), and it steals that bit from
 
 So dispatching a shift on `funct7` decodes `SRAI` as `SRLI`, and truncating the
 shift amount to 5 bits makes `slli x1, x1, 40` shift by 8. Hence
-`DecodedInst::funct6()` and `shamt6()` in `include/decoder.hpp`, and the tests
-in `tests/test_decoder.cpp` that specifically shift by more than 31.
+`DecodedInst::funct6()` and `shamt6()` in `src/decoder.rs`, and the tests
+in `tests/decoder.rs` that specifically shift by more than 31.
 
 ---
 
 ## 6. The resulting layout
 
 ```
-include/                    src/
-  types.hpp     widths, memory map, sign_extend
-  trap.hpp      exception/interrupt cause codes   trap.cpp
-  result.hpp    Result<T> / Status
-  device.hpp    the Device interface, AccessType
-  bus.hpp       address decoding                  bus.cpp
-  dram.hpp      guest RAM at 0x8000_0000          dram.cpp
-  decoder.hpp   u32 -> DecodedInst                decoder.cpp
-  cpu.hpp       registers, fetch/decode/execute   cpu.cpp
-                CLI                               main.cpp
+src/
+  types.rs      widths, memory map, sign_extend
+  trap.rs       exception/interrupt cause codes, Trap, Res<T>
+  device.rs     the Device trait, AccessType
+  bus.rs        address decoding
+  dram.rs       guest RAM at 0x8000_0000
+  decoder.rs    u32 -> DecodedInst
+  cpu/mod.rs    registers, fetch/decode/execute
+  main.rs       CLI
 tests/
-  test_decoder.cpp   immediate encodings, field extraction, funct6
-  test_bus.cpp       bounds checking, endianness, address decoding
-  test_cpu.cpp       OP-IMM semantics, trap behaviour, PC-on-trap
+  decoder.rs    immediate encodings, field extraction, funct6
+  bus.rs        bounds checking, endianness, address decoding
+  cpu.rs        OP-IMM semantics, trap behaviour, PC-on-trap
 ```
 
-The core builds as a static library (`riscv_core`) so the executable and the
-tests link the same code. CMake now defaults to a Release build — the inner loop
-runs billions of times when booting an OS, and an unoptimised build turns a
-seconds-long boot into a minutes-long one.
+The crate is a library (`riscv_emu`) plus a binary, so the executable and the
+tests use the same code. Build with `--release` — the inner loop runs billions of
+times when booting an OS, and an unoptimised build turns a seconds-long boot into a
+minutes-long one.
 
 ## 7. Try it
 
 ```bash
-cmake -S . -B build && cmake --build build
-cd build && ctest --output-on-failure
+cargo build --release
+cargo test --release
 ```
 
-`test_decoder`, `test_bus` and `test_cpu` are the suites this phase added, and
+`decoder`, `bus` and `cpu` (under `tests/`) are the suites this phase added, and
 they still run unchanged: the immediate encodings for all six formats, the bus's
 bounds checking and address decoding, and OP-IMM dispatching on `funct3` rather
 than executing everything as ADDI.
 
 > **A note on reading this document.** Each phase doc describes the state of the
 > project at the end of that phase, and is left as written. Later phases change
-> some of what is described here — the built-in demo in `src/main.cpp` is now a
+> some of what is described here — the built-in demo in `src/main.rs` is now a
 > UART program rather than the OP-IMM sequence phase 0 shipped, and `ebreak` no
 > longer traps as an illegal instruction because phase 2 implemented the SYSTEM
-> instructions. `README.md` always reflects the current state.
+> instructions. `README.md` always reflects the current state. The project was later rewritten from C++20
+> into Rust; the file references in these documents have been updated to the Rust sources, but
+> the prose describes each phase as it was designed (see [`15-rust-port.md`](15-rust-port.md)).
 
 ---
 

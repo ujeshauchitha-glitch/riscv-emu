@@ -6,7 +6,7 @@ top of a virtio transport written once instead of once per device.
 
 ## The virtio transport
 
-[`virtio_mmio.hpp`](../include/virtio_mmio.hpp) holds everything that is the same
+[`virtio/mod.rs`](../src/virtio/mod.rs) holds everything that is the same
 for every virtio device: the register file, feature negotiation, the queues, and
 interrupts. A device supplies only what makes it itself — an id, its feature bits,
 its config space, and what to do when the driver rings the doorbell.
@@ -27,7 +27,7 @@ against the capacity *before* it is multiplied.)
 
 ## The block device
 
-[`virtio.hpp`](../include/virtio.hpp). A request is a header, **any number of data
+[`virtio/blk.rs`](../src/virtio/blk.rs). A request is a header, **any number of data
 buffers**, and a status byte. xv6 sends exactly three descriptors; Linux sends one
 data buffer per physically contiguous run of pages, so a large request is a long
 chain. The device walks the whole chain.
@@ -49,7 +49,7 @@ experiment with a Debian image you don't want to damage.
 
 ## Network: a card, and a network behind it
 
-[`virtio_net.hpp`](../include/virtio_net.hpp) is a pure frame mover: queue 0
+[`virtio/net.rs`](../src/virtio/net.rs) is a pure frame mover: queue 0
 receives, queue 1 transmits, every frame is preceded by a 12-byte header. No
 offload features are negotiated (no checksum or segmentation offload, no merged
 buffers), so the guest does that work and the header is all zeros. What the "wire"
@@ -57,7 +57,7 @@ is — a loopback, a user-mode network — is a `NetBackend` behind the card.
 
 ### The user-mode network
 
-[`usernet.hpp`](../include/usernet.hpp) gives the guest a working internet
+[`net/usernet.rs`](../src/net/usernet.rs) gives the guest a working internet
 connection with **no tap device, bridge, root privileges or host setup** — the same
 idea as QEMU's "user" networking. The guest believes it is on a small private
 network with a router:
@@ -95,7 +95,7 @@ input.
 
 ### Host sockets, portably
 
-[`hostnet.hpp`](../include/hostnet.hpp) wraps the dozen socket operations the
+[`net/hostnet.rs`](../src/net/hostnet.rs) wraps the dozen socket operations the
 emulator needs so that nothing else has an `#ifdef`. On Windows that means WinSock
 (`WSAStartup`, `closesocket`, `WSAEWOULDBLOCK`); the project builds with MinGW
 **statically linked**, because a machine with two MinGW installs otherwise loads
@@ -133,14 +133,14 @@ does.
 
 ## Tests
 
-- [`tests/test_virtio.cpp`](../tests/test_virtio.cpp) drives the devices the way a
+- [`tests/virtio.rs`](../tests/virtio.rs) drives the devices the way a
   guest driver does: multi-buffer reads and writes, flush, get-id, chains with no
   status byte, a too-short header, a buffer pointing at nonexistent memory, a
   backwards read, a descriptor loop; file-backed persistence and snapshot
   copy-on-write (including a half-sector write that must not lose the other half);
   the network card holding a frame until the guest posts a buffer, and dropping
   one that doesn't fit; the RTC's latched read and its alarm.
-- [`tests/test_usernet.cpp`](../tests/test_usernet.cpp) acts as a guest kernel,
+- [`tests/usernet.rs`](../tests/usernet.rs) acts as a guest kernel,
   building raw Ethernet frames with its *own* encoders, against real sockets on the
   host's loopback: ARP, a ping, a DHCP exchange (including a refused lease), a UDP
   round trip, DNS forwarding to a fake resolver, and **a complete TCP connection** —
