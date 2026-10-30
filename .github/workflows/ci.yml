@@ -13,9 +13,16 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # A warning fails the build in CI, but not for someone building locally on a
+  # newer or older compiler with different lints.
+  RUSTFLAGS: -D warnings
+  # A missing RISC-V toolchain must fail the bare-metal self-tests, not skip them.
+  RISCV_EMU_REQUIRE_TOOLCHAIN: "1"
+
 jobs:
   build-and-test:
-    name: Build, unit tests, riscv-tests
+    name: Build, tests, riscv-tests
     runs-on: ubuntu-latest
 
     steps:
@@ -24,19 +31,27 @@ jobs:
       - name: Install the RISC-V toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            gcc-riscv64-unknown-elf cmake build-essential
+          sudo apt-get install -y --no-install-recommends gcc-riscv64-unknown-elf
 
-      - name: Configure
-        # -Werror only in CI: a warning fails the build here, but should not
-        # stop someone building locally on a compiler with different defaults.
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-Werror
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
 
       - name: Build
-        run: cmake --build build -j
+        run: cargo build --release
 
-      - name: Unit tests and bare-metal self-tests
-        run: ctest --test-dir build --output-on-failure
+      # Unit tests, the soft-float and bit-manipulation differential tests
+      # against independent Python references, the GDB and network tests, and
+      # the bare-metal self-tests assembled with the real toolchain.
+      - name: Tests
+        run: cargo test --release
 
       # The official suite the RISC-V project maintains. This is the check that
       # matters most: everything else in this repository was written alongside
@@ -48,4 +63,4 @@ jobs:
         if: always()
         run: |
           echo "### Results" >> "$GITHUB_STEP_SUMMARY"
-          ctest --test-dir build -N 2>/dev/null | tail -1 >> "$GITHUB_STEP_SUMMARY" || true
+          echo "Rust unit/integration tests, differential tests, riscv-tests" >> "$GITHUB_STEP_SUMMARY"

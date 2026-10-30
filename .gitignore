@@ -1,3 +1,7 @@
+# Cargo build products.
+target/
+
+# Scratch build directories (the guest kernels and test images are built here).
 build/
 build-*/
 *.o

@@ -80,6 +80,8 @@ same as *"the whole thing boots"*. The earlier phases are a fair warning: Linux 
 five fixes beyond a working xv6, three of them firmware the emulator didn't know it was
 missing.
 
+**Update, 2026-10-30.** Debian's own riscv64 kernel (6.12.113+deb13) and root filesystem, taken unmodified from the official `debian-13-nocloud-riscv64` cloud image, were booted on this emulator (the Rust version, `--smp 1`) to a login prompt, and a root login ran commands (`uname -m` printed `riscv64`). `boot-debian.sh` itself, and `--smp` above 1, were not run. Two things were needed that this document did not predict: `--timer-divisor 40`, because on a slow host the guest's own start-up timeouts (systemd gives `systemd-journald` a minute) expired in guest time and sent systemd to emergency mode; and a fix in `src/platform.rs` so that, while a live console is attached, an idle guest's clock follows real time instead of jumping to the next deadline (otherwise the 60-second login timeout expired before a keystroke could arrive). The image also runs a first-boot wizard that waits for a key; `systemd.firstboot=off` on the command line skips it.
+
 So expect to meet something. When you do, in rough order of likelihood:
 
 - **The kernel doesn't reach userspace.** Boot with `--gdb` and break in
@@ -93,7 +95,7 @@ So expect to meet something. When you do, in rough order of likelihood:
 - **Hangs waiting for something.** `--rng-seed 1` removes entropy as a variable;
   `--rtc-fixed 1760000000` removes the clock as one.
 - **Slow.** A boot is about a billion instructions. Bigger `--quantum` is faster;
-  `--smp 1` is faster still. `build/bench_cpu` measures the interpreter.
+  `--smp 1` is faster still. `cargo run --release --example bench_cpu --` measures the interpreter.
 - **No network.** In the guest: `ip addr` should show `10.0.2.15`; `ping 10.0.2.2` tests
   the gateway; `curl` tests TCP. (`ping` to anything beyond the gateway is not answered —
   see [phase 11](11-virtio-and-networking.md).)

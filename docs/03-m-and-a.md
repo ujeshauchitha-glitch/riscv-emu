@@ -111,7 +111,7 @@ So `enter_trap()` clears the reservation. Real hardware does the same thing, for
 the same reason.
 
 This is exactly the sort of thing that passes every naive test, so
-`tests/test_muldiv_atomic.cpp` tests it with a control: the same program with a
+`tests/muldiv_atomic.rs` tests it with a control: the same program with a
 `NOP` between the `LR` and the `SC` succeeds, and swapping *only* that
 instruction for an `ECALL` makes it fail. That isolates the trap as the cause
 rather than the extra instruction.
@@ -154,7 +154,7 @@ lines cannot be made atomic at all.
 
 ## Testing
 
-**`tests/test_muldiv_atomic.cpp`** — the division edge cases, the MULH family
+**`tests/muldiv_atomic.rs`** — the division edge cases, the MULH family
 including the signed/unsigned disagreements, `*W` sign extension, every AMO, and
 the LR/SC reservation semantics with the trap control described above.
 
@@ -169,8 +169,8 @@ later checks also use as a live scratch pointer. After check 11 that left
 kind of realistic register-pressure mistake that unit tests built from
 hand-written encoders never produce.
 
-Three assertions in earlier suites were superseded: `test_rv64i.cpp` asserted
-`mul` traps as illegal, and `test_csr.cpp` asserted `misa` does not advertise M
+Three assertions in earlier suites were superseded: `tests/rv64i.rs` asserted
+`mul` traps as illegal, and `tests/csr.rs` asserted `misa` does not advertise M
 or A. Both were true until this phase implemented them.
 
 ---

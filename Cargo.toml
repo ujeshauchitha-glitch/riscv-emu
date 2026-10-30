@@ -1,0 +1,30 @@
+[package]
+name = "riscv-emu"
+version = "0.2.0"
+edition = "2021"
+description = "An RV64GC emulator that boots xv6, Linux and Debian"
+license = "MIT"
+
+# No third-party dependencies: the standard library is all this needs, and that is
+# a property worth keeping.
+[dependencies]
+
+[lib]
+name = "riscv_emu"
+path = "src/lib.rs"
+
+[[bin]]
+name = "riscv_emu"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+
+# Tests run fast enough unoptimised except the differential and benchmark ones,
+# which are marked #[ignore] or sized accordingly.
+[profile.test]
+opt-level = 2

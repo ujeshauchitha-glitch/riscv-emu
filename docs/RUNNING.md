@@ -20,14 +20,16 @@ There are three tiers, and only the first is genuinely required.
 
 ### To build and run the emulator
 
-A C++20 compiler and CMake ≥ 3.16. Nothing else — the emulator has no
-third-party dependencies.
+Rust (stable, 1.75 or newer) and a C linker. Nothing else — the emulator has no
+third-party crates; it uses only the standard library.
 
 | | |
 |---|---|
-| Fedora / RHEL | `sudo dnf install gcc-c++ cmake make` |
-| Debian / Ubuntu | `sudo apt install build-essential cmake` |
-| Arch | `sudo pacman -S gcc cmake make` |
+| Any (recommended) | install [rustup](https://rustup.rs) |
+| Fedora / RHEL | `sudo dnf install cargo rust gcc` |
+| Debian / Ubuntu | `sudo apt install cargo build-essential` |
+| Arch | `sudo pacman -S rust gcc` |
+| Windows | rustup, with either the MSVC or the GNU (MinGW) toolchain |
 
 ### To run the test suites and boot xv6
 
@@ -46,11 +48,8 @@ Note the prefix differs: Fedora's is `riscv64-elf-`, Debian's is
 care which you have — but it is why a command copied from one distribution's
 documentation fails on another.
 
-CMake reports what it found at configure time:
-
-```
--- RISC-V toolchain not found; skipping the bare-metal self-test
-```
+`cargo test` prints a `SKIPPED` line for each self-test it cannot assemble. Set
+`RISCV_EMU_REQUIRE_TOOLCHAIN=1` to make a missing toolchain a failure instead (CI does).
 
 ### To boot Linux
 
@@ -74,26 +73,13 @@ generates. `sudo dnf install dtc` / `sudo apt install device-tree-compiler`.
 ## 2. Build
 
 ```bash
-cmake -S . -B build
-cmake --build build
+cargo build --release
 ```
 
-This produces:
-
-| | |
-|---|---|
-| `build/riscv_emu` | the emulator |
-| `build/test_*` | seven unit-test binaries |
-| `build/*_selftest.bin` | four bare-metal guest programs (toolchain only) |
-
-The default build type is **Release**, because the interpreter loop runs
-billions of times when booting an OS and an unoptimised build turns a
-seconds-long boot into a minutes-long one. For debugging:
-
-```bash
-cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug
-cmake --build build-debug
-```
+This produces `target/release/riscv_emu` (`.exe` on Windows), the emulator. Use
+**`--release`**: the interpreter loop runs billions of times when booting an OS, and
+an unoptimised build turns a seconds-long boot into a minutes-long one. For
+debugging, a plain `cargo build` gives `target/debug/riscv_emu` with overflow checks on.
 
 ---
 
@@ -105,7 +91,7 @@ With no arguments the emulator runs a small program compiled into the binary: it
 writes a string to the UART one byte at a time, then powers the machine off.
 
 ```bash
-./build/riscv_emu
+./target/release/riscv_emu
 ```
 ```
 hello, RISC-V
@@ -119,7 +105,7 @@ the bus, memory-mapped I/O to the console, and the syscon poweroff device.
 ### Running a program
 
 ```bash
-./build/riscv_emu path/to/image
+./target/release/riscv_emu path/to/image
 ```
 
 The format is detected from the file's magic number:
@@ -161,7 +147,7 @@ Guest console output goes to **stdout**; the emulator's own diagnostics and the
 trace go to **stderr**. So this captures only what the guest printed:
 
 ```bash
-./build/riscv_emu image.bin 2>/dev/null
+./target/release/riscv_emu image.bin 2>/dev/null
 ```
 
 ---
@@ -169,25 +155,25 @@ trace go to **stderr**. So this captures only what the guest printed:
 ## 4. Test
 
 ```bash
-cd build && ctest --output-on-failure
+cargo test --release
 ```
 
-Eleven suites. Seven are unit tests linked against the emulator core:
+Each file in `tests/` is one suite:
 
 | Suite | Covers |
 |---|---|
-| `test_decoder` | all six immediate encodings, field extraction, RV64 shift fields |
-| `test_bus` | bounds checks, endianness, address decoding, trap causes |
-| `test_cpu` | OP-IMM dispatch, illegal-instruction traps, PC-on-trap |
-| `test_rv64i` | the whole base integer instruction set |
-| `test_csr` | CSR semantics, trap entry, `MRET`, interrupt gating |
-| `test_muldiv_atomic` | M edge cases, AMOs, the LR/SC reservation |
-| `test_devices` | UART, CLINT, syscon, and the ELF loader |
+| `decoder`, `compressed` | immediate encodings, field extraction, RV64 shifts; every C expansion against GNU assembler output |
+| `bus`, `devices`, `interrupt_devices` | bounds checks, endianness; UART, CLINT, syscon, ELF loader; PLIC and virtio-blk |
+| `cpu`, `rv64i`, `csr`, `muldiv_atomic` | OP-IMM dispatch and traps; the whole base ISA; CSR semantics and trap entry; M edge cases and LR/SC |
+| `supervisor`, `float` | S-mode, delegation, Sv39 with permission checks; F/D: boxing, FS, rounding |
+| `firmware`, `smp`, `virtio`, `usernet`, `gdb` | device tree and SBI; real code on several harts; the virtio devices; the user network against real sockets; the GDB server |
+| `bitmanip`, `softfloat_diff` | differential tests against independent Python models (89,122 and 45,000 vectors) and the host FPU |
+| `cli`, `selftests` | the built binary: options, exit codes, console input; the bare-metal programs below |
 
-Four are **bare-metal self-tests**: real assembly programs, assembled by the GNU
-assembler and executed by the emulator. They matter because they validate the
-decoder against an independent implementation rather than against the encoders
-in `tests/machine.hpp`.
+Four are **bare-metal self-tests** (`tests/selftests.rs`): real assembly programs in
+`examples/`, assembled by the GNU assembler and executed by the emulator. They matter
+because they validate the decoder against an independent implementation rather than
+against the encoders in `tests/common/mod.rs`.
 
 | Self-test | Result | What it does |
 |---|---|---|
@@ -196,10 +182,10 @@ in `tests/machine.hpp`.
 | `muldiv_atomic_selftest` | `a0 = 0x7fff` | 15 checks, ending with an LR/SC spinlock |
 | `device_selftest` | `a0 = 0x1f` | prints, takes a timer interrupt, powers off |
 
-Run one directly:
+Run one directly (after assembling it, as the README shows):
 
 ```bash
-./build/riscv_emu --dump build/rv64i_selftest.bin
+./target/release/riscv_emu --dump rv64i_selftest.bin
 ```
 
 **How to read a self-test failure.** Each accumulates one bit in `a0` per
@@ -216,8 +202,8 @@ corresponding `examples/*.S` and the comment above it says what it was testing.
 Run a single unit suite for faster iteration:
 
 ```bash
-./build/test_rv64i
-cd build && ctest -R csr --output-on-failure    # or by name pattern
+cargo test --release --test rv64i
+cargo test --release csr                  # or by name pattern
 ```
 
 ---
@@ -258,7 +244,7 @@ Assemble, link at `0x8000_0000`, and run:
 ```bash
 riscv64-unknown-elf-as -march=rv64ima_zicsr -mabi=lp64 -o hello.o hello.S
 riscv64-unknown-elf-ld --no-warn-rwx-segments -T examples/link.ld -o hello.elf hello.o
-./build/riscv_emu hello.elf
+./target/release/riscv_emu hello.elf
 ```
 
 `examples/link.ld` places everything at `0x8000_0000`, which is where the
@@ -279,7 +265,7 @@ working code, not toys.
 ### Instruction tracing
 
 ```bash
-./build/riscv_emu --trace hello.elf 2>trace.log
+./target/release/riscv_emu --trace hello.elf 2>trace.log
 ```
 
 Each line shows the PC, the raw instruction word, the mnemonic, and only the
@@ -415,7 +401,7 @@ places it by its program headers, and `--disk` backs the virtio block device
 with the filesystem image:
 
 ```bash
-./build/riscv_emu --disk fs.img --max-steps 1000000000000 kernel/kernel
+./target/release/riscv_emu --disk fs.img --max-steps 1000000000000 kernel/kernel
 ```
 
 The step budget matters: the default 100 million stops the run partway through
@@ -430,7 +416,7 @@ Give it time to boot before the input matters:
 
 ```bash
 (sleep 40; printf 'ls\n'; sleep 20) | \
-  ./build/riscv_emu --disk fs.img --max-steps 900000000 kernel/kernel
+  ./target/release/riscv_emu --disk fs.img --max-steps 900000000 kernel/kernel
 ```
 
 ### If it stops instead of booting
@@ -484,7 +470,7 @@ reproducibility, made in phase 4.
 ### Doing it by hand
 
 ```bash
-./build/riscv_emu --linux \
+./target/release/riscv_emu --linux \
                   --dram-size-mb 512 \
                   --max-steps 100000000000 \
                   --initrd build/initramfs.cpio \
@@ -503,7 +489,7 @@ is needed.
 which is useful for inspecting it:
 
 ```bash
-./build/riscv_emu --dump-dtb /tmp/machine.dtb
+./target/release/riscv_emu --dump-dtb /tmp/machine.dtb
 dtc -I dtb -O dts /tmp/machine.dtb | head -40
 ```
 
@@ -520,7 +506,7 @@ See [`13-booting-debian.md`](13-booting-debian.md) for what it needs and what ha
 has not been verified. Doing it by hand, with a kernel `Image` and a root filesystem:
 
 ```bash
-./build/riscv_emu --linux --smp 4 --dram-size-mb 1024 --rng --rtc \
+./target/release/riscv_emu --linux --smp 4 --dram-size-mb 1024 --rng --rtc \
     --drive rootfs.ext4 --net user \
     --bootargs "console=ttyS0 earlycon=sbi root=/dev/vda rootfstype=ext4 rw rootwait" \
     Image
@@ -529,7 +515,7 @@ has not been verified. Doing it by hand, with a kernel `Image` and a root filesy
 ### Attaching a debugger
 
 ```bash
-./build/riscv_emu --gdb 1234 --linux Image          # nothing has run yet
+./target/release/riscv_emu --gdb 1234 --linux Image          # nothing has run yet
 gdb-multiarch vmlinux -ex 'set architecture riscv:rv64' -ex 'target remote :1234'
 (gdb) break start_kernel
 (gdb) continue
@@ -542,7 +528,7 @@ Details, and what a debugger can and cannot do here, in
 ### Measuring speed
 
 ```bash
-./build/bench_cpu 40000000 platform paged devices
+cargo run --release --example bench_cpu -- 40000000 platform paged devices
 ```
 
 ---

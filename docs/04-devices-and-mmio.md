@@ -9,7 +9,7 @@ only by inspecting registers from outside. From now on a guest can *tell you
 what it is doing*, which is the only practical way to debug a booting kernel.
 
 ```
-$ ./build/riscv_emu
+$ ./target/release/riscv_emu
 hello, RISC-V
 
 machine powered off after 79 instruction(s)
@@ -58,7 +58,7 @@ set DLAB -> write divisor -> clear DLAB -> start sending
 
 A UART that ignored DLAB would take those divisor bytes as characters and print
 garbage before the first real output. It is a small thing that produces a
-confusing symptom, so `tests/test_devices.cpp` checks it explicitly.
+confusing symptom, so `tests/devices.rs` checks it explicitly.
 
 ## The CLINT, and why the timer matters
 
@@ -149,7 +149,7 @@ The format is detected from the magic number, so `riscv_emu image.elf` and
 
 ## Testing
 
-**`tests/test_devices.cpp`** — 43 checks: UART registers including DLAB banking,
+**`tests/devices.rs`** — 43 checks: UART registers including DLAB banking,
 CLINT counting and interrupt assertion, `mtimecmp` written as 32-bit halves,
 syscon exit codes, ELF loading with `.bss` zero-fill and rejection of malformed
 images, plus two integration tests where a guest program prints and powers off,
@@ -168,9 +168,9 @@ pointer. It uses `auipc` instead, which is what position-independent code does
 anyway.
 
 ```bash
-./build/riscv_emu                                   # the built-in demo
-./build/riscv_emu build/device_selftest.bin         # or an ELF, or a flat binary
-cd build && ctest --output-on-failure
+./target/release/riscv_emu                                   # the built-in demo
+./target/release/riscv_emu build/device_selftest.bin         # or an ELF, or a flat binary
+cargo test --release
 ```
 
 ---

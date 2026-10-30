@@ -29,7 +29,7 @@ piece of design:
 
 So a write to any CSR numbered `0xC00`–`0xFFF` is illegal, and a user-mode read
 of a machine CSR is illegal, without any per-register table needing to say so.
-`csr::is_read_only()` and `csr::min_privilege()` in `include/csr.hpp` are one
+`csr::is_read_only()` and `csr::min_privilege()` in `src/csr.rs` are one
 line each.
 
 ## Registers implemented
@@ -160,7 +160,7 @@ interrupt.
 
 The catch: **in vectored mode, exceptions still go to the base address.** Only
 interrupts are vectored. Applying the multiply to exceptions sends a page fault
-somewhere into the middle of the table. `tests/test_csr.cpp` covers this
+somewhere into the middle of the table. `tests/csr.rs` covers this
 explicitly.
 
 The mode field is WARL, so writing a reserved mode (2 or 3) is coerced rather
@@ -232,7 +232,7 @@ there is a timer to sleep until.
 
 ## Testing
 
-**`tests/test_csr.cpp`** — 50 checks covering CSR semantics, the suppression
+**`tests/csr.rs`** — 50 checks covering CSR semantics, the suppression
 rules, per-register masking, the full trap → handler → `MRET` round trip,
 vectored-vs-direct dispatch, and interrupt gating and priority.
 
@@ -247,16 +247,15 @@ machine" marker. That worked only because `mtvec` was zero. Once a test installs
 a handler, `EBREAK` traps into it like anything else — and a handler that itself
 ends in `EBREAK` re-enters forever, quietly overwriting `mcause` and `mepc`
 along the way. Test programs now end with a self-loop (`HALT()` in
-`tests/machine.hpp`), which stops making progress without touching any
+`tests/common/mod.rs`), which stops making progress without touching any
 architectural state.
 
-Two assertions in `tests/test_rv64i.cpp` also had to change: phase 1 asserted
+Two assertions in `tests/rv64i.rs` also had to change: phase 1 asserted
 that CSR instructions and `MRET` trap as illegal. They no longer do, because
 this phase implements them. That is the test being superseded, not a regression.
 
 ```bash
-cmake -S . -B build && cmake --build build
-cd build && ctest --output-on-failure
+cargo build --release && cargo test --release
 ```
 
 ---

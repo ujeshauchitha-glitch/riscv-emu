@@ -160,9 +160,9 @@ which is a standing trap for anyone writing one by hand.
 
 ### Generated, not shelled out to `dtc`
 
-`src/fdt.cpp` builds the blob directly. That keeps the emulator dependency-free,
+`src/fdt.rs` builds the blob directly. That keeps the emulator dependency-free,
 but the better reason is that the tree is generated from **the same constants in
-`types.hpp` that the devices are attached with**. A `.dts` file maintained
+`src/types.rs` that the devices are attached with**. A `.dts` file maintained
 alongside the code is a second description of the machine that can drift out of
 agreement with the first; this one cannot.
 
@@ -214,7 +214,7 @@ code that is not the subject of this project.
 Implementing the interface directly means the kernel takes **exactly the same
 path it would take on real hardware** — the same `ecall`, the same register
 convention, the same return codes — and the thing it calls into is fifty lines
-you can read. `src/sbi.cpp` is shorter than the section of this document
+you can read. `src/sbi.rs` is shorter than the section of this document
 describing it.
 
 With `--linux`, the emulator enters the kernel the way a bootloader would: in
@@ -246,8 +246,8 @@ must be allowed to see its own `ecall`s. xv6 does exactly that.
 | | |
 |---|---|
 | `rv64uf` 11/11, `rv64ud` 12/12 | the official floating-point suites |
-| `tests/test_float.cpp` | 124 checks: boxing, the FS enable, rounding modes, the RISC-V/C disagreements, fused multiply-add |
-| `tests/test_firmware.cpp` | 76 checks: device-tree structure and content, every SBI call, and that SBI is off unless asked for |
+| `tests/float.rs` | 124 checks: boxing, the FS enable, rounding modes, the RISC-V/C disagreements, fused multiply-add |
+| `tests/firmware.rs` | 76 checks: device-tree structure and content, every SBI call, and that SBI is off unless asked for |
 | `dtc -I dtb` | the generated device tree, parsed back by the reference implementation |
 
 **125/125 riscv-tests pass.**

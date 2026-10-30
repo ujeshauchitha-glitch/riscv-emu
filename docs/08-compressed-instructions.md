@@ -180,7 +180,7 @@ Both `mepc` and `sepc` now mask only bit 0, and
 
 ## Testing
 
-**Against the real assembler.** The core of `tests/test_compressed.cpp` is a
+**Against the real assembler.** The core of `tests/compressed.rs` is a
 table of 57 rows, each pairing a compressed encoding with the encoding of its
 documented expansion — both produced by `riscv64-unknown-elf-as`, not by
 anything in this repository:
@@ -217,7 +217,7 @@ expansion is then mostly a rewiring rather than a shuffle, which costs a real
 decoder almost nothing.
 
 In software it costs verbosity instead, which is why every encoding in
-`src/decoder.cpp` is written out explicitly with the spec's own bit-range
+`src/decoder.rs` is written out explicitly with the spec's own bit-range
 notation beside it. Guessing at these produces an emulator that runs most
 programs and corrupts a few.
 

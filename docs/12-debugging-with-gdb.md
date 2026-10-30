@@ -7,7 +7,7 @@ around, step. The emulator speaks the **GDB remote serial protocol**, so a stock
 as it would to QEMU or to real hardware behind a debug probe.
 
 ```bash
-./build/riscv_emu --gdb 1234 --linux Image        # waits for the debugger; nothing has run yet
+./target/release/riscv_emu --gdb 1234 --linux Image        # waits for the debugger; nothing has run yet
 ```
 ```
 $ gdb-multiarch vmlinux
@@ -93,7 +93,7 @@ instruction rather than hitting it forever.
 
 ## Tests
 
-[`tests/test_gdbstub.cpp`](../tests/test_gdbstub.cpp), with real programs running
+[`tests/gdb.rs`](../tests/gdb.rs), with real programs running
 underneath: framing and checksums; register reads and writes (including the
 little-endian encoding, and `x0` staying zero); memory through an Sv39 mapping
 (and an unmapped address being an *error*, not a guest fault); a breakpoint stopping

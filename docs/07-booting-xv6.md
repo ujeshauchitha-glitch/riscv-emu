@@ -75,7 +75,7 @@ outside it would look exactly like a hang.
 The first version of `complete()` did the obvious mirror image: clear the
 in-service bit and stop there.
 
-That is wrong, and `tests/test_interrupt_devices.cpp` caught it. Consider a
+That is wrong, and `tests/interrupt_devices.rs` caught it. Consider a
 second keystroke arriving *while* the first is being handled. The line is still
 asserted, but the pending bit was cleared by the claim, and nothing puts it
 back. The interrupt is silently lost.
@@ -221,7 +221,7 @@ When stdin is a pipe rather than a terminal there is nothing to put into raw
 mode, and the non-blocking read still works. That is what makes this possible:
 
 ```bash
-printf 'ls\n' | ./build/riscv_emu --disk fs.img kernel
+printf 'ls\n' | ./target/release/riscv_emu --disk fs.img kernel
 ```
 
 ---
@@ -363,7 +363,7 @@ cause. A check that cannot fail is worse than no check, because it is evidence.
 Then, by hand:
 
 ```bash
-./build/riscv_emu --disk fs.img --max-steps 1000000000000 kernel/kernel
+./target/release/riscv_emu --disk fs.img --max-steps 1000000000000 kernel/kernel
 ```
 
 The step budget matters: the default 100 million stops the run partway through
@@ -416,7 +416,7 @@ trap machinery, the PLIC and the disk are all simultaneously correct.
 
 ## Tests
 
-`tests/test_interrupt_devices.cpp` covers both new devices — 728 checks:
+`tests/interrupt_devices.rs` covers both new devices — 728 checks:
 
 **PLIC.** That an idle controller reports nothing and claims IRQ 0; that a
 pending source drives `SEIP` and dropping the line drops it; that priority 0, a
