@@ -441,6 +441,16 @@ impl Platform {
                     std::thread::sleep(Duration::from_micros(200));
                     self.clock.tick(2000);
                     consecutive_idle = 0;
+                } else if self.uart.as_ref().map_or(false, |u| u.borrow().host_input_active()) {
+                    // A live console is attached, so a person may be about to type. Jumping
+                    // the clock to the next deadline would time out whatever the guest is
+                    // waiting on (a login prompt gives up after 60 s of guest time) before
+                    // a keystroke could possibly arrive. Let guest time follow real time
+                    // instead, at the same nominal 10 MHz as above.
+                    std::thread::sleep(Duration::from_millis(1));
+                    self.clock.tick(10_000);
+                    self.since_host_poll = 4096;
+                    consecutive_idle = 0;
                 } else if !self.fast_forward_idle() {
                     let host_input = self.uart.as_ref().map_or(false, |u| u.borrow().host_input_active());
                     if host_input {
