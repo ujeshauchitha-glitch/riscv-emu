@@ -507,3 +507,31 @@ fn rtc_follows_the_host_clock_by_default() {
     let rtc = Rtc::new();
     assert!(rtc.now_ns() > 1_600_000_000u64 * 1_000_000_000); // after September 2020
 }
+
+#[test]
+fn blk_image_truncated_while_running_gives_an_io_error_not_garbage() {
+    let path = temp_image("truncate", 8);
+    let mut blk = VirtioBlk::new();
+    blk.open_image(path.to_str().unwrap(), false).unwrap();
+    let mut rig = Rig::new(blk);
+    rig.setup_queue(0);
+
+    // Someone shrinks the image underneath the emulator: the device still believes it has 8 sectors.
+    std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(2 * 512).unwrap();
+
+    // A read inside what remains still works...
+    write_blk_header(&rig, HDR, 0, 1);
+    rig.poke(STATUS, 1, 0xff);
+    rig.post(0, &[(HDR, 16, false), (DATA2, 512, true), (STATUS, 1, true)]);
+    assert_eq!(rig.peek(STATUS, 1), 0);
+
+    // ...one past the new end fails with an I/O error and leaves the guest buffer untouched.
+    rig.write_bytes(DATA1, &[0x5a; 512]);
+    write_blk_header(&rig, HDR, 0, 6);
+    rig.poke(STATUS, 1, 0xff);
+    rig.post(0, &[(HDR, 16, false), (DATA1, 512, true), (STATUS, 1, true)]);
+    assert_eq!(rig.peek(STATUS, 1), 1);
+    assert_eq!(rig.peek(DATA1, 1), 0x5a);
+    drop(rig);
+    std::fs::remove_file(&path).unwrap();
+}
