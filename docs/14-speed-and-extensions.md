@@ -96,3 +96,20 @@ Debian's riscv64 baseline (RV64GC) requires. A distribution built for the newer 
 profile does require it, and would not run here.
 
 Likewise `pack`/`zip` (Zbkb) and the cache-block instructions (Zicbom/Zicboz) are absent.
+
+## Interpreter speed: what was tried (Rust build)
+
+Method: the Debian boot, 200M instructions, built and run alternately against the previous
+commit (three rounds each — machine timing drifts by tens of percent between runs, so only
+same-round pairs are compared). A sampling profile at function level put the time in
+`step_core` (~38%), `execute` (~33%), address translation (~8%) and memory loads (~8%).
+
+| Change | Result |
+|---|---|
+| Skip the Zb probe for base ALU encodings (ADDI, ADD, ...) | kept: about 4% faster, 3 of 3 rounds |
+| Inline `permitted` and the `mem_load`/`mem_store` wrappers | kept: about 5% faster, 3 of 3 rounds |
+| Decode cache 4096 → 32768 slots | rejected: slower or equal in 3 of 3 rounds (a bigger table costs more cache misses than it saves) |
+| `#[inline(always)]` on the nine hottest `execute_*` functions | rejected: no difference within noise |
+
+Larger gains would need a structural change (decoded basic blocks with chained dispatch),
+not further micro-tuning of the single-step path.
