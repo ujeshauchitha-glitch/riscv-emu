@@ -167,8 +167,11 @@ impl Cpu {
     // --- register-immediate ALU ------------------------------------------------------------
 
     fn execute_op_imm(&mut self, inst: &DecodedInst) -> Res<()> {
-        if let Some(r) = self.execute_zb_op_imm(inst) {
-            return r;
+        // Zb only claims shift-slot encodings; ADDI, ANDI and friends skip the probe.
+        if matches!(inst.funct3, 1 | 5) {
+            if let Some(r) = self.execute_zb_op_imm(inst) {
+                return r;
+            }
         }
         let rs1 = self.read_reg(inst.rs1);
         let imm = inst.imm as u64; // already sign-extended to 64
@@ -207,8 +210,10 @@ impl Cpu {
     // The "*W" immediate forms: compute on 32 bits, sign-extend to 64. The shift
     // amount is 5 bits, so these select on funct7 rather than funct6.
     fn execute_op_imm_32(&mut self, inst: &DecodedInst) -> Res<()> {
-        if let Some(r) = self.execute_zb_op_imm_32(inst) {
-            return r;
+        if matches!(inst.funct3, 1 | 5) {
+            if let Some(r) = self.execute_zb_op_imm_32(inst) {
+                return r;
+            }
         }
         let rs1 = self.read_reg(inst.rs1);
         let result = match inst.funct3 {
@@ -241,8 +246,11 @@ impl Cpu {
         if inst.funct7 == 0x01 {
             return self.execute_mul_div(inst);
         }
-        if let Some(r) = self.execute_zb_op(inst) {
-            return r;
+        // Every Zb/Zicond encoding has a non-zero funct7; plain ADD/SLL/... do not.
+        if inst.funct7 != 0x00 {
+            if let Some(r) = self.execute_zb_op(inst) {
+                return r;
+            }
         }
         if inst.funct7 != 0x00 && inst.funct7 != 0x20 {
             return Err(illegal(inst));
@@ -284,8 +292,10 @@ impl Cpu {
         if inst.funct7 == 0x01 {
             return self.execute_mul_div_32(inst);
         }
-        if let Some(r) = self.execute_zb_op_32(inst) {
-            return r;
+        if inst.funct7 != 0x00 {
+            if let Some(r) = self.execute_zb_op_32(inst) {
+                return r;
+            }
         }
         if inst.funct7 != 0x00 && inst.funct7 != 0x20 {
             return Err(illegal(inst));
