@@ -351,6 +351,7 @@ impl Cpu {
         (vaddr & (PAGE_SIZE - 1)) + size as u64 > PAGE_SIZE
     }
 
+    #[inline]
     pub fn mem_load(&mut self, vaddr: u64, size: usize, ty: AccessType) -> Res<u64> {
         if Self::crosses_page(vaddr, size) {
             return self.load_across_pages(vaddr, size, ty);
@@ -360,6 +361,7 @@ impl Cpu {
         self.bus.load(pa, size, ty)
     }
 
+    #[inline]
     pub fn mem_store(&mut self, vaddr: u64, size: usize, value: u64) -> Res<()> {
         if Self::crosses_page(vaddr, size) {
             return self.store_across_pages(vaddr, size, value);

@@ -87,6 +87,7 @@ fn page_fault_for(ty: AccessType) -> Exception {
 }
 
 /// Does `perms` permit this access at this privilege?
+#[inline(always)]
 fn permitted(perms: u64, ty: AccessType, priv_: u32, csrs: &CsrFile) -> bool {
     // The U bit says which side of the user/supervisor divide a page is on.
     let user_page = perms & pte::U != 0;
